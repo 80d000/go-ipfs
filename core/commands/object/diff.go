@@ -4,12 +4,11 @@ import (
 	"fmt"
 	"io"
 
-	cmdenv "github.com/ipfs/go-ipfs/core/commands/cmdenv"
-	coreiface "github.com/ipfs/go-ipfs/core/coreapi/interface"
-	"github.com/ipfs/go-ipfs/dagutils"
+	cmds "github.com/ipfs/go-ipfs-cmds"
+	"github.com/ipfs/go-merkledag/dagutils"
+	path "github.com/ipfs/interface-go-ipfs-core/path"
 
-	cmds "gx/ipfs/QmR77mMvvh8mJBBWQmBfQBu8oD38NUN4KE9SL2gDgAQNc6/go-ipfs-cmds"
-	cmdkit "gx/ipfs/Qmde5VP1qUkyQXKCfmEUA7bP64V2HAptbJ7phuPp7jXWwg/go-ipfs-cmdkit"
+	cmdenv "github.com/ipfs/go-ipfs/core/commands/cmdenv"
 )
 
 const (
@@ -21,8 +20,8 @@ type Changes struct {
 }
 
 var ObjectDiffCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
-		Tagline: "Display the diff between two ipfs objects.",
+	Helptext: cmds.HelpText{
+		Tagline: "Display the diff between two IPFS objects.",
 		ShortDescription: `
 'ipfs object diff' is a command used to show the differences between
 two IPFS objects.`,
@@ -47,12 +46,12 @@ Example:
    Changed "bar" from QmNgd5cz2jNftnAHBhcRUGdtiaMzb5Rhjqd4etondHHST8 to QmRfFVsjSXkhFxrfWnLpMae2M4GBVsry6VAuYYcji5MiZb.
 `,
 	},
-	Arguments: []cmdkit.Argument{
-		cmdkit.StringArg("obj_a", true, false, "Object to diff against."),
-		cmdkit.StringArg("obj_b", true, false, "Object to diff."),
+	Arguments: []cmds.Argument{
+		cmds.StringArg("obj_a", true, false, "Object to diff against."),
+		cmds.StringArg("obj_b", true, false, "Object to diff."),
 	},
-	Options: []cmdkit.Option{
-		cmdkit.BoolOption(verboseOptionName, "v", "Print extra information."),
+	Options: []cmds.Option{
+		cmds.BoolOption(verboseOptionName, "v", "Print extra information."),
 	},
 	Run: func(req *cmds.Request, res cmds.ResponseEmitter, env cmds.Environment) error {
 		api, err := cmdenv.GetApi(env, req)
@@ -60,18 +59,8 @@ Example:
 			return err
 		}
 
-		a := req.Arguments[0]
-		b := req.Arguments[1]
-
-		pa, err := coreiface.ParsePath(a)
-		if err != nil {
-			return err
-		}
-
-		pb, err := coreiface.ParsePath(b)
-		if err != nil {
-			return err
-		}
+		pa := path.New(req.Arguments[0])
+		pb := path.New(req.Arguments[1])
 
 		changes, err := api.Object().Diff(req.Context, pa, pb)
 		if err != nil {
@@ -81,7 +70,7 @@ Example:
 		out := make([]*dagutils.Change, len(changes))
 		for i, change := range changes {
 			out[i] = &dagutils.Change{
-				Type: change.Type,
+				Type: dagutils.ChangeType(change.Type),
 				Path: change.Path,
 			}
 

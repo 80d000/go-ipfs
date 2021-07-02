@@ -5,18 +5,17 @@ import (
 	"io"
 	"os"
 
+	filestore "github.com/ipfs/go-filestore"
 	core "github.com/ipfs/go-ipfs/core"
 	cmdenv "github.com/ipfs/go-ipfs/core/commands/cmdenv"
 	e "github.com/ipfs/go-ipfs/core/commands/e"
-	filestore "github.com/ipfs/go-ipfs/filestore"
 
-	cmds "gx/ipfs/QmR77mMvvh8mJBBWQmBfQBu8oD38NUN4KE9SL2gDgAQNc6/go-ipfs-cmds"
-	cid "gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
-	"gx/ipfs/Qmde5VP1qUkyQXKCfmEUA7bP64V2HAptbJ7phuPp7jXWwg/go-ipfs-cmdkit"
+	"github.com/ipfs/go-cid"
+	"github.com/ipfs/go-ipfs-cmds"
 )
 
 var FileStoreCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
+	Helptext: cmds.HelpText{
 		Tagline: "Interact with filestore objects.",
 	},
 	Subcommands: map[string]*cmds.Command{
@@ -31,7 +30,7 @@ const (
 )
 
 var lsFileStore = &cmds.Command{
-	Helptext: cmdkit.HelpText{
+	Helptext: cmds.HelpText{
 		Tagline: "List objects in filestore.",
 		LongDescription: `
 List objects in the filestore.
@@ -44,11 +43,11 @@ The output is:
 <hash> <size> <path> <offset>
 `,
 	},
-	Arguments: []cmdkit.Argument{
-		cmdkit.StringArg("obj", false, true, "Cid of objects to list."),
+	Arguments: []cmds.Argument{
+		cmds.StringArg("obj", false, true, "Cid of objects to list."),
 	},
-	Options: []cmdkit.Option{
-		cmdkit.BoolOption(fileOrderOptionName, "sort the results based on the path of the backing file"),
+	Options: []cmds.Option{
+		cmds.BoolOption(fileOrderOptionName, "sort the results based on the path of the backing file"),
 	},
 	Run: func(req *cmds.Request, res cmds.ResponseEmitter, env cmds.Environment) error {
 		_, fs, err := getFilestore(env)
@@ -98,7 +97,7 @@ The output is:
 }
 
 var verifyFileStore = &cmds.Command{
-	Helptext: cmdkit.HelpText{
+	Helptext: cmds.HelpText{
 		Tagline: "Verify objects in filestore.",
 		LongDescription: `
 Verify objects in the filestore.
@@ -121,11 +120,11 @@ ERROR:    internal error, most likely due to a corrupt database
 For ERROR entries the error will also be printed to stderr.
 `,
 	},
-	Arguments: []cmdkit.Argument{
-		cmdkit.StringArg("obj", false, true, "Cid of objects to verify."),
+	Arguments: []cmds.Argument{
+		cmds.StringArg("obj", false, true, "Cid of objects to verify."),
 	},
-	Options: []cmdkit.Option{
-		cmdkit.BoolOption(fileOrderOptionName, "verify the objects based on the order of the backing file"),
+	Options: []cmds.Option{
+		cmds.BoolOption(fileOrderOptionName, "verify the objects based on the order of the backing file"),
 	},
 	Run: func(req *cmds.Request, res cmds.ResponseEmitter, env cmds.Environment) error {
 		_, fs, err := getFilestore(env)
@@ -187,7 +186,7 @@ For ERROR entries the error will also be printed to stderr.
 }
 
 var dupsFileStore = &cmds.Command{
-	Helptext: cmdkit.HelpText{
+	Helptext: cmds.HelpText{
 		Tagline: "List blocks that are both in the filestore and standard block storage.",
 	},
 	Run: func(req *cmds.Request, res cmds.ResponseEmitter, env cmds.Environment) error {

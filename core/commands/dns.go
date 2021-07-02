@@ -4,12 +4,12 @@ import (
 	"fmt"
 	"io"
 
+	cmdenv "github.com/ipfs/go-ipfs/core/commands/cmdenv"
 	ncmd "github.com/ipfs/go-ipfs/core/commands/name"
-	nsopts "github.com/ipfs/go-ipfs/core/coreapi/interface/options/namesys"
-	namesys "github.com/ipfs/go-ipfs/namesys"
+	namesys "github.com/ipfs/go-namesys"
+	nsopts "github.com/ipfs/interface-go-ipfs-core/options/namesys"
 
-	cmds "gx/ipfs/QmR77mMvvh8mJBBWQmBfQBu8oD38NUN4KE9SL2gDgAQNc6/go-ipfs-cmds"
-	cmdkit "gx/ipfs/Qmde5VP1qUkyQXKCfmEUA7bP64V2HAptbJ7phuPp7jXWwg/go-ipfs-cmdkit"
+	cmds "github.com/ipfs/go-ipfs-cmds"
 )
 
 const (
@@ -17,7 +17,7 @@ const (
 )
 
 var DNSCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
+	Helptext: cmds.HelpText{
 		Tagline: "Resolve DNS links.",
 		ShortDescription: `
 Multihashes are hard to remember, but domain names are usually easy to
@@ -54,34 +54,36 @@ The resolver can recursively resolve:
 `,
 	},
 
-	Arguments: []cmdkit.Argument{
-		cmdkit.StringArg("domain-name", true, false, "The domain-name name to resolve.").EnableStdin(),
+	Arguments: []cmds.Argument{
+		cmds.StringArg("domain-name", true, false, "The domain-name name to resolve.").EnableStdin(),
 	},
-	Options: []cmdkit.Option{
-		cmdkit.BoolOption(dnsRecursiveOptionName, "r", "Resolve until the result is not a DNS link."),
+	Options: []cmds.Option{
+		cmds.BoolOption(dnsRecursiveOptionName, "r", "Resolve until the result is not a DNS link.").WithDefault(true),
 	},
 	Run: func(req *cmds.Request, res cmds.ResponseEmitter, env cmds.Environment) error {
-		recursive, _ := req.Options[dnsRecursiveOptionName].(bool)
-		name := req.Arguments[0]
-		resolver := namesys.NewDNSResolver()
-
-		var ropts []nsopts.ResolveOpt
-		if !recursive {
-			ropts = append(ropts, nsopts.Depth(1))
-		}
-
-		output, err := resolver.Resolve(req.Context, name, ropts...)
-		if err == namesys.ErrResolveFailed {
+		node, err := cmdenv.GetNode(env)
+		if err != nil {
 			return err
 		}
-		if err != nil {
+
+		recursive, _ := req.Options[dnsRecursiveOptionName].(bool)
+		name := req.Arguments[0]
+		resolver := namesys.NewDNSResolver(node.DNSResolver.LookupTXT)
+
+		var routing []nsopts.ResolveOpt
+		if !recursive {
+			routing = append(routing, nsopts.Depth(1))
+		}
+
+		output, err := resolver.Resolve(req.Context, name, routing...)
+		if err != nil && (recursive || err != namesys.ErrResolveRecursion) {
 			return err
 		}
 		return cmds.EmitOnce(res, &ncmd.ResolvedPath{Path: output})
 	},
 	Encoders: cmds.EncoderMap{
 		cmds.Text: cmds.MakeTypedEncoder(func(req *cmds.Request, w io.Writer, out *ncmd.ResolvedPath) error {
-			fmt.Fprintln(w, out.Path.String())
+			fmt.Fprintln(w, cmdenv.EscNonPrint(out.Path.String()))
 			return nil
 		}),
 	},

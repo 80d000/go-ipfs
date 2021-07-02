@@ -9,8 +9,8 @@ import (
 	"github.com/ipfs/go-ipfs/repo"
 	"github.com/ipfs/go-ipfs/repo/fsrepo"
 
-	humanize "gx/ipfs/QmPSBJL4momYnE7DcUyk2DVhD6rH488ZmHBGLbxNdhU44K/go-humanize"
-	badgerds "gx/ipfs/QmVoK2ivqzp5ZgWiEdBNFbKH7nzf9C4wPYr8cH7CGPMHtC/go-ds-badger"
+	humanize "github.com/dustin/go-humanize"
+	badgerds "github.com/ipfs/go-ds-badger"
 )
 
 // Plugins is exported list of plugins that will be loaded
@@ -30,7 +30,7 @@ func (*badgerdsPlugin) Version() string {
 	return "0.1.0"
 }
 
-func (*badgerdsPlugin) Init() error {
+func (*badgerdsPlugin) Init(_ *plugin.Environment) error {
 	return nil
 }
 
@@ -60,7 +60,7 @@ func (*badgerdsPlugin) DatastoreConfigParser() fsrepo.ConfigFromMap {
 
 		sw, ok := params["syncWrites"]
 		if !ok {
-			c.syncWrites = true
+			c.syncWrites = false
 		} else {
 			if swb, ok := sw.(bool); ok {
 				c.syncWrites = swb

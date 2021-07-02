@@ -8,8 +8,8 @@ import (
 	"runtime"
 	"time"
 
-	goprocess "gx/ipfs/QmSF8fPo3jgVBAy8fpdjjYqgG87dkJgUprRBHRd2tmfgpP/goprocess"
-	logging "gx/ipfs/QmcuXC5cxs79ro2cUuHs4HQ2bkDLJUYokwL8aivcX6HW3C/go-log"
+	logging "github.com/ipfs/go-log"
+	goprocess "github.com/jbenet/goprocess"
 )
 
 var log = logging.Logger("mount")
@@ -36,7 +36,7 @@ type Mount interface {
 // It does so by calling diskutil or fusermount directly.
 func ForceUnmount(m Mount) error {
 	point := m.MountPoint()
-	log.Warningf("Force-Unmounting %s...", point)
+	log.Warnf("Force-Unmounting %s...", point)
 
 	cmd, err := UnmountCmd(point)
 	if err != nil {
@@ -98,7 +98,7 @@ type closer struct {
 }
 
 func (c *closer) Close() error {
-	log.Warning(" (c *closer) Close(),", c.M.MountPoint())
+	log.Warn(" (c *closer) Close(),", c.M.MountPoint())
 	return c.M.Unmount()
 }
 

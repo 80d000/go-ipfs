@@ -8,15 +8,15 @@ import (
 	"io/ioutil"
 	"text/tabwriter"
 
+	cmds "github.com/ipfs/go-ipfs-cmds"
 	"github.com/ipfs/go-ipfs/core/commands/cmdenv"
-	coreiface "github.com/ipfs/go-ipfs/core/coreapi/interface"
-	"github.com/ipfs/go-ipfs/core/coreapi/interface/options"
 
-	"gx/ipfs/QmR77mMvvh8mJBBWQmBfQBu8oD38NUN4KE9SL2gDgAQNc6/go-ipfs-cmds"
-	"gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
-	ipld "gx/ipfs/QmRL22E4paat7ky7vx9MLpR97JHHbFPrg3ytFQw6qp1y1s/go-ipld-format"
-	dag "gx/ipfs/QmUtsx89yiCY6F8mbpP6ecXckiSzCBH7EvkKZuZEHBcr1m/go-merkledag"
-	"gx/ipfs/Qmde5VP1qUkyQXKCfmEUA7bP64V2HAptbJ7phuPp7jXWwg/go-ipfs-cmdkit"
+	humanize "github.com/dustin/go-humanize"
+	"github.com/ipfs/go-cid"
+	ipld "github.com/ipfs/go-ipld-format"
+	dag "github.com/ipfs/go-merkledag"
+	"github.com/ipfs/interface-go-ipfs-core/options"
+	path "github.com/ipfs/interface-go-ipfs-core/path"
 )
 
 type Node struct {
@@ -34,7 +34,7 @@ type Object struct {
 	Links []Link `json:"Links,omitempty"`
 }
 
-var ErrDataEncoding = errors.New("unkown data field encoding")
+var ErrDataEncoding = errors.New("unknown data field encoding")
 
 const (
 	headersOptionName      = "headers"
@@ -43,14 +43,15 @@ const (
 	datafieldencOptionName = "datafieldenc"
 	pinOptionName          = "pin"
 	quietOptionName        = "quiet"
+	humanOptionName        = "human"
 )
 
 var ObjectCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
-		Tagline: "Interact with IPFS objects.",
+	Helptext: cmds.HelpText{
+		Tagline: "Deprecated commands to interact with dag-pb objects. Use 'dag' or 'files' instead.",
 		ShortDescription: `
-'ipfs object' is a plumbing command used to manipulate DAG objects
-directly.`,
+'ipfs object' is a legacy plumbing command used to manipulate dag-pb objects
+directly. Deprecated, use more modern 'ipfs dag' and 'ipfs files' instead.`,
 	},
 
 	Subcommands: map[string]*cmds.Command{
@@ -67,23 +68,25 @@ directly.`,
 
 // ObjectDataCmd object data command
 var ObjectDataCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
-		Tagline: "Output the raw bytes of an IPFS object.",
+	Helptext: cmds.HelpText{
+		Tagline: "Deprecated way to read the raw bytes of a dag-pb object: use 'dag get' instead.",
 		ShortDescription: `
-'ipfs object data' is a plumbing command for retrieving the raw bytes stored
-in a DAG node. It outputs to stdout, and <key> is a base58 encoded multihash.
+'ipfs object data' is a deprecated plumbing command for retrieving the raw
+bytes stored in a dag-pb node. It outputs to stdout, and <key> is a base58
+encoded multihash. Provided for legacy reasons. Use 'ipfs dag get' instead.
 `,
 		LongDescription: `
-'ipfs object data' is a plumbing command for retrieving the raw bytes stored
-in a DAG node. It outputs to stdout, and <key> is a base58 encoded multihash.
+'ipfs object data' is a deprecated plumbing command for retrieving the raw
+bytes stored in a dag-pb node. It outputs to stdout, and <key> is a base58
+encoded multihash. Provided for legacy reasons. Use 'ipfs dag get' instead.
 
 Note that the "--encoding" option does not affect the output, since the output
 is the raw data of the object.
 `,
 	},
 
-	Arguments: []cmdkit.Argument{
-		cmdkit.StringArg("key", true, false, "Key of the object to retrieve, in base58-encoded multihash format.").EnableStdin(),
+	Arguments: []cmds.Argument{
+		cmds.StringArg("key", true, false, "Key of the object to retrieve, in base58-encoded multihash format.").EnableStdin(),
 	},
 	Run: func(req *cmds.Request, res cmds.ResponseEmitter, env cmds.Environment) error {
 		api, err := cmdenv.GetApi(env, req)
@@ -91,10 +94,7 @@ is the raw data of the object.
 			return err
 		}
 
-		path, err := coreiface.ParsePath(req.Arguments[0])
-		if err != nil {
-			return err
-		}
+		path := path.New(req.Arguments[0])
 
 		data, err := api.Object().Data(req.Context, path)
 		if err != nil {
@@ -107,20 +107,20 @@ is the raw data of the object.
 
 // ObjectLinksCmd object links command
 var ObjectLinksCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
-		Tagline: "Output the links pointed to by the specified object.",
+	Helptext: cmds.HelpText{
+		Tagline: "Deprecated way to output links in the specified dag-pb object: use 'dag get' instead.",
 		ShortDescription: `
 'ipfs object links' is a plumbing command for retrieving the links from
-a DAG node. It outputs to stdout, and <key> is a base58 encoded
-multihash.
+a dag-pb node. It outputs to stdout, and <key> is a base58 encoded
+multihash. Provided for legacy reasons. Use 'ipfs dag get' instead.
 `,
 	},
 
-	Arguments: []cmdkit.Argument{
-		cmdkit.StringArg("key", true, false, "Key of the object to retrieve, in base58-encoded multihash format.").EnableStdin(),
+	Arguments: []cmds.Argument{
+		cmds.StringArg("key", true, false, "Key of the dag-pb object to retrieve, in base58-encoded multihash format.").EnableStdin(),
 	},
-	Options: []cmdkit.Option{
-		cmdkit.BoolOption(headersOptionName, "v", "Print table headers (Hash, Size, Name)."),
+	Options: []cmds.Option{
+		cmds.BoolOption(headersOptionName, "v", "Print table headers (Hash, Size, Name)."),
 	},
 	Run: func(req *cmds.Request, res cmds.ResponseEmitter, env cmds.Environment) error {
 		api, err := cmdenv.GetApi(env, req)
@@ -133,10 +133,7 @@ multihash.
 			return err
 		}
 
-		path, err := coreiface.ParsePath(req.Arguments[0])
-		if err != nil {
-			return err
-		}
+		path := path.New(req.Arguments[0])
 
 		rp, err := api.ResolvePath(req.Context, path)
 		if err != nil {
@@ -172,7 +169,7 @@ multihash.
 				fmt.Fprintln(tw, "Hash\tSize\tName")
 			}
 			for _, link := range out.Links {
-				fmt.Fprintf(tw, "%s\t%v\t%s\n", link.Hash, link.Size, link.Name)
+				fmt.Fprintf(tw, "%s\t%v\t%s\n", link.Hash, link.Size, cmdenv.EscNonPrint(link.Name))
 			}
 			tw.Flush()
 
@@ -184,38 +181,22 @@ multihash.
 
 // ObjectGetCmd object get command
 var ObjectGetCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
-		Tagline: "Get and serialize the DAG node named by <key>.",
+	Helptext: cmds.HelpText{
+		Tagline: "Deprecated way to get and serialize the dag-pb node. Use 'dag get' instead",
 		ShortDescription: `
-'ipfs object get' is a plumbing command for retrieving DAG nodes.
-It serializes the DAG node to the format specified by the "--encoding"
-flag. It outputs to stdout, and <key> is a base58 encoded multihash.
-`,
-		LongDescription: `
-'ipfs object get' is a plumbing command for retrieving DAG nodes.
+'ipfs object get' is a plumbing command for retrieving dag-pb nodes.
 It serializes the DAG node to the format specified by the "--encoding"
 flag. It outputs to stdout, and <key> is a base58 encoded multihash.
 
-This command outputs data in the following encodings:
-  * "protobuf"
-  * "json"
-  * "xml"
-(Specified by the "--encoding" or "--enc" flag)
-
-The encoding of the object's data field can be specifed by using the
---data-encoding flag
-
-Supported values are:
-	* "text" (default)
-	* "base64"
+DEPRECATED and provided for legacy reasons. Use 'ipfs dag get' instead.
 `,
 	},
 
-	Arguments: []cmdkit.Argument{
-		cmdkit.StringArg("key", true, false, "Key of the object to retrieve, in base58-encoded multihash format.").EnableStdin(),
+	Arguments: []cmds.Argument{
+		cmds.StringArg("key", true, false, "Key of the dag-pb object to retrieve, in base58-encoded multihash format.").EnableStdin(),
 	},
-	Options: []cmdkit.Option{
-		cmdkit.StringOption(encodingOptionName, "Encoding type of the data field, either \"text\" or \"base64\".").WithDefault("text"),
+	Options: []cmds.Option{
+		cmds.StringOption(encodingOptionName, "Encoding type of the data field, either \"text\" or \"base64\".").WithDefault("text"),
 	},
 	Run: func(req *cmds.Request, res cmds.ResponseEmitter, env cmds.Environment) error {
 		api, err := cmdenv.GetApi(env, req)
@@ -228,10 +209,7 @@ Supported values are:
 			return err
 		}
 
-		path, err := coreiface.ParsePath(req.Arguments[0])
-		if err != nil {
-			return err
-		}
+		path := path.New(req.Arguments[0])
 
 		datafieldenc, _ := req.Options[encodingOptionName].(string)
 		if err != nil {
@@ -286,19 +264,24 @@ Supported values are:
 			if err != nil {
 				return err
 			}
-			fmt.Fprint(w, marshaled)
-
-			return nil
+			_, err = w.Write(marshaled)
+			return err
 		}),
 	},
 }
 
 // ObjectStatCmd object stat command
 var ObjectStatCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
-		Tagline: "Get stats for the DAG node named by <key>.",
+	Helptext: cmds.HelpText{
+		Tagline: "Deprecated way to read stats for the dag-pb node. Use 'files stat' instead.",
 		ShortDescription: `
-'ipfs object stat' is a plumbing command to print DAG node statistics.
+'ipfs object stat' is a plumbing command to print dag-pb node statistics.
+<key> is a base58 encoded multihash.
+
+DEPRECATED: modern replacements are 'files stat' and 'dag stat'
+`,
+		LongDescription: `
+'ipfs object stat' is a plumbing command to print dag-pb node statistics.
 <key> is a base58 encoded multihash. It outputs to stdout:
 
 	NumLinks        int number of links in link table
@@ -306,11 +289,34 @@ var ObjectStatCmd = &cmds.Command{
 	LinksSize       int size of the links segment
 	DataSize        int size of the data segment
 	CumulativeSize  int cumulative size of object and its references
+
+DEPRECATED: Provided for legacy reasons. Modern replacements:
+
+  For unixfs, 'ipfs files stat' can be used:
+
+    $ ipfs files stat --with-local /ipfs/QmWfVY9y3xjsixTgbd9AorQxH7VtMpzfx2HaWtsoUYecaX
+	QmWfVY9y3xjsixTgbd9AorQxH7VtMpzfx2HaWtsoUYecaX
+	Size: 5
+	CumulativeSize: 13
+	ChildBlocks: 0
+	Type: file
+	Local: 13 B of 13 B (100.00%)
+
+  Reported sizes are based on metadata present in root block, and should not be
+  trusted.  A slower, but more secure alternative is 'ipfs dag stat', which
+  will work for every DAG type.  It comes with a benefit of calculating the
+  size by walking the DAG:
+
+	$ ipfs dag stat /ipfs/QmWfVY9y3xjsixTgbd9AorQxH7VtMpzfx2HaWtsoUYecaX
+	Size: 13, NumBlocks: 1
 `,
 	},
 
-	Arguments: []cmdkit.Argument{
-		cmdkit.StringArg("key", true, false, "Key of the object to retrieve, in base58-encoded multihash format.").EnableStdin(),
+	Arguments: []cmds.Argument{
+		cmds.StringArg("key", true, false, "Key of the object to retrieve, in base58-encoded multihash format.").EnableStdin(),
+	},
+	Options: []cmds.Option{
+		cmds.BoolOption(humanOptionName, "Print sizes in human readable format (e.g., 1K 234M 2G)"),
 	},
 	Run: func(req *cmds.Request, res cmds.ResponseEmitter, env cmds.Environment) error {
 		api, err := cmdenv.GetApi(env, req)
@@ -323,12 +329,7 @@ var ObjectStatCmd = &cmds.Command{
 			return err
 		}
 
-		path, err := coreiface.ParsePath(req.Arguments[0])
-		if err != nil {
-			return err
-		}
-
-		ns, err := api.Object().Stat(req.Context, path)
+		ns, err := api.Object().Stat(req.Context, path.New(req.Arguments[0]))
 		if err != nil {
 			return err
 		}
@@ -347,14 +348,21 @@ var ObjectStatCmd = &cmds.Command{
 	Type: ipld.NodeStat{},
 	Encoders: cmds.EncoderMap{
 		cmds.Text: cmds.MakeTypedEncoder(func(req *cmds.Request, w io.Writer, out *ipld.NodeStat) error {
+			wtr := tabwriter.NewWriter(w, 0, 0, 1, ' ', 0)
+			defer wtr.Flush()
 			fw := func(s string, n int) {
-				fmt.Fprintf(w, "%s: %d\n", s, n)
+				fmt.Fprintf(wtr, "%s:\t%d\n", s, n)
 			}
+			human, _ := req.Options[humanOptionName].(bool)
 			fw("NumLinks", out.NumLinks)
 			fw("BlockSize", out.BlockSize)
 			fw("LinksSize", out.LinksSize)
 			fw("DataSize", out.DataSize)
-			fw("CumulativeSize", out.CumulativeSize)
+			if human {
+				fmt.Fprintf(wtr, "%s:\t%s\n", "CumulativeSize", humanize.Bytes(uint64(out.CumulativeSize)))
+			} else {
+				fw("CumulativeSize", out.CumulativeSize)
+			}
 
 			return nil
 		}),
@@ -363,51 +371,24 @@ var ObjectStatCmd = &cmds.Command{
 
 // ObjectPutCmd object put command
 var ObjectPutCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
-		Tagline: "Store input as a DAG object, print its key.",
+	Helptext: cmds.HelpText{
+		Tagline: "Deprecated way to store input as a DAG object. Use 'dag put' instead.",
 		ShortDescription: `
-'ipfs object put' is a plumbing command for storing DAG nodes.
-It reads from stdin, and the output is a base58 encoded multihash.
-`,
-		LongDescription: `
-'ipfs object put' is a plumbing command for storing DAG nodes.
+'ipfs object put' is a plumbing command for storing dag-pb nodes.
 It reads from stdin, and the output is a base58 encoded multihash.
 
-Data should be in the format specified by the --inputenc flag.
---inputenc may be one of the following:
-	* "protobuf"
-	* "json" (default)
-
-Examples:
-
-	$ echo '{ "Data": "abc" }' | ipfs object put
-
-This creates a node with the data 'abc' and no links. For an object with
-links, create a file named 'node.json' with the contents:
-
-    {
-        "Data": "another",
-        "Links": [ {
-            "Name": "some link",
-            "Hash": "QmXg9Pp2ytZ14xgmQjYEiHjVjMFXzCVVEcRTWJBmLgR39V",
-            "Size": 8
-        } ]
-    }
-
-And then run:
-
-	$ ipfs object put node.json
+DEPRECATED and provided for legacy reasons. Use 'ipfs dag put' instead.
 `,
 	},
 
-	Arguments: []cmdkit.Argument{
-		cmdkit.FileArg("data", true, false, "Data to be stored as a DAG object.").EnableStdin(),
+	Arguments: []cmds.Argument{
+		cmds.FileArg("data", true, false, "Data to be stored as a dag-pb object.").EnableStdin(),
 	},
-	Options: []cmdkit.Option{
-		cmdkit.StringOption(inputencOptionName, "Encoding type of input data. One of: {\"protobuf\", \"json\"}.").WithDefault("json"),
-		cmdkit.StringOption(datafieldencOptionName, "Encoding type of the data field, either \"text\" or \"base64\".").WithDefault("text"),
-		cmdkit.BoolOption(pinOptionName, "Pin this object when adding."),
-		cmdkit.BoolOption(quietOptionName, "q", "Write minimal output."),
+	Options: []cmds.Option{
+		cmds.StringOption(inputencOptionName, "Encoding type of input data. One of: {\"protobuf\", \"json\"}.").WithDefault("json"),
+		cmds.StringOption(datafieldencOptionName, "Encoding type of the data field, either \"text\" or \"base64\".").WithDefault("text"),
+		cmds.BoolOption(pinOptionName, "Pin this object when adding."),
+		cmds.BoolOption(quietOptionName, "q", "Write minimal output."),
 	},
 	Run: func(req *cmds.Request, res cmds.ResponseEmitter, env cmds.Environment) error {
 		api, err := cmdenv.GetApi(env, req)
@@ -469,23 +450,26 @@ And then run:
 
 // ObjectNewCmd object new command
 var ObjectNewCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
-		Tagline: "Create a new object from an ipfs template.",
+	Helptext: cmds.HelpText{
+		Tagline: "Deprecated way to create a new dag-pb object from a template.",
 		ShortDescription: `
-'ipfs object new' is a plumbing command for creating new DAG nodes.
+'ipfs object new' is a plumbing command for creating new dag-pb nodes.
+DEPRECATED and provided for legacy reasons. Use 'dag put' and 'files' instead.
 `,
 		LongDescription: `
-'ipfs object new' is a plumbing command for creating new DAG nodes.
+'ipfs object new' is a plumbing command for creating new dag-pb nodes.
 By default it creates and returns a new empty merkledag node, but
 you may pass an optional template argument to create a preformatted
 node.
 
 Available templates:
 	* unixfs-dir
+
+DEPRECATED and provided for legacy reasons. Use 'dag put' and 'files' instead.
 `,
 	},
-	Arguments: []cmdkit.Argument{
-		cmdkit.StringArg("template", false, false, "Template to use. Optional."),
+	Arguments: []cmds.Argument{
+		cmds.StringArg("template", false, false, "Template to use. Optional."),
 	},
 	Run: func(req *cmds.Request, res cmds.ResponseEmitter, env cmds.Environment) error {
 		api, err := cmdenv.GetApi(env, req)

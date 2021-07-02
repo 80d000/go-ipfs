@@ -10,6 +10,10 @@ CIDv0="QmS4ustL54uo8FzR9455qaxZwuMiUhyvMcX9Ba8nUH4uVv"
 CIDv1="zdj7WZAAFKPvYPPzyJLso2hhxo8a7ZACFQ4DvvfrNXTHidofr"
 CIDb32="bafybeibxm2nsadl3fnxv2sxcxmxaco2jl53wpeorjdzidjwf5aqdg7wa6u"
 
+CIDbase="QmYNmQKp6SuaVrpgWRsPTgCQCnpxUYGq76YEKBXuj2N4H6"
+CIDb32pb="bafybeievd6mwe6vcwnkwo3eizs3h7w3a34opszbyfxziqdxguhjw7imdve"
+CIDb32raw="bafkreievd6mwe6vcwnkwo3eizs3h7w3a34opszbyfxziqdxguhjw7imdve"
+
 test_expect_success "cid base32 works" '
   echo $CIDb32 > expected &&
   ipfs cid base32 $CIDv0 > actual1 &&
@@ -24,6 +28,12 @@ test_expect_success "cid format -v 1 -b base58btc" '
   test_cmp actual1 expected &&
   ipfs cid format -v 1 -b base58btc $CIDb32 > actual2 &&
   test_cmp expected actual2
+'
+
+test_expect_success "cid format -v 0" '
+  echo $CIDv0 > expected &&
+  ipfs cid format -v 0 $CIDb32 > actual &&
+  test_cmp expected actual
 '
 
 cat <<EOF > various_cids
@@ -71,12 +81,15 @@ test_expect_success "cid format -v 1 -b base58btc works from stdin" '
 
 cat <<EOF > bases_expect
       0  identity
+0    48  base2
 b    98  base32
 B    66  base32upper
 c    99  base32pad
 C    67  base32padupper
 f   102  base16
 F    70  base16upper
+k   107  base36
+K    75  base36upper
 m   109  base64
 M    77  base64pad
 t   116  base32hexpad
@@ -111,10 +124,12 @@ cat <<EOF > codecs_expect
   225  decred-tx
   240  dash-block
   241  dash-tx
+61697  fil-commitment-unsealed
+61698  fil-commitment-sealed
 EOF
 
 cat <<EOF > hashes_expect
-    0  id
+    0  identity
    17  sha1
    18  sha2-256
    19  sha2-512
@@ -226,5 +241,18 @@ test_expect_success "cid hashes --numeric" '
   ipfs cid hashes --numeric > actual &&
   test_cmp hashes_expect actual
 '
+
+test_expect_success "cid format -c raw" '
+  echo $CIDb32raw > expected &&
+  ipfs cid format --codec raw -b base32 $CIDb32pb > actual &&
+  test_cmp actual expected
+'
+
+test_expect_success "cid format -c protobuf -v 0" '
+  echo $CIDbase > expected &&
+  ipfs cid format --codec protobuf -v 0 $CIDb32raw > actual &&
+  test_cmp actual expected
+'
+
 
 test_done

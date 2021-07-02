@@ -3,28 +3,30 @@ package dagcmd
 import (
 	"fmt"
 	"io"
-	"math"
-	"strings"
 
 	"github.com/ipfs/go-ipfs/core/commands/cmdenv"
-	"github.com/ipfs/go-ipfs/core/coreapi/interface"
-	"github.com/ipfs/go-ipfs/core/coredag"
 
-	path "gx/ipfs/QmQ3YSqfxunT5QBg6KBVskKyRE26q6hjSMyhpxchpm7jEN/go-path"
-	cmds "gx/ipfs/QmR77mMvvh8mJBBWQmBfQBu8oD38NUN4KE9SL2gDgAQNc6/go-ipfs-cmds"
-	cid "gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
-	ipld "gx/ipfs/QmRL22E4paat7ky7vx9MLpR97JHHbFPrg3ytFQw6qp1y1s/go-ipld-format"
-	files "gx/ipfs/QmaXvvAVAQ5ABqM5xtjYmV85xmN5MkWAZsX9H9Fwo4FVXp/go-ipfs-files"
-	cidenc "gx/ipfs/QmdPQx9fvN5ExVwMhRmh7YpCQJzJrFhd1AjVBwJmRMFJeX/go-cidutil/cidenc"
-	cmdkit "gx/ipfs/Qmde5VP1qUkyQXKCfmEUA7bP64V2HAptbJ7phuPp7jXWwg/go-ipfs-cmdkit"
-	mh "gx/ipfs/QmerPMzPk1mJVowm8KgmoknWa4yCYvvugMPsgWmDNUvDLW/go-multihash"
+	cid "github.com/ipfs/go-cid"
+	cidenc "github.com/ipfs/go-cidutil/cidenc"
+	cmds "github.com/ipfs/go-ipfs-cmds"
+	ipfspath "github.com/ipfs/go-path"
+	//gipfree "github.com/ipld/go-ipld-prime/impl/free"
+	//gipselector "github.com/ipld/go-ipld-prime/traversal/selector"
+	//gipselectorbuilder "github.com/ipld/go-ipld-prime/traversal/selector/builder"
 )
 
+const (
+	progressOptionName = "progress"
+	silentOptionName   = "silent"
+	pinRootsOptionName = "pin-roots"
+)
+
+// DagCmd provides a subset of commands for interacting with ipld dag objects
 var DagCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
-		Tagline: "Interact with ipld dag objects.",
+	Helptext: cmds.HelpText{
+		Tagline: "Interact with IPLD DAG objects.",
 		ShortDescription: `
-'ipfs dag' is used for creating and manipulating dag objects.
+'ipfs dag' is used for creating and manipulating DAG objects/hierarchies.
 
 This subcommand is currently an experimental feature, but it is intended
 to deprecate and replace the existing 'ipfs object' command moving forward.
@@ -34,6 +36,9 @@ to deprecate and replace the existing 'ipfs object' command moving forward.
 		"put":     DagPutCmd,
 		"get":     DagGetCmd,
 		"resolve": DagResolveCmd,
+		"import":  DagImportCmd,
+		"export":  DagExportCmd,
+		"stat":    DagStatCmd,
 	},
 }
 
@@ -48,88 +53,36 @@ type ResolveOutput struct {
 	RemPath string
 }
 
+// CarImportOutput is the output type of the 'dag import' commands
+type CarImportOutput struct {
+	Root RootMeta
+}
+
+// RootMeta is the metadata for a root pinning response
+type RootMeta struct {
+	Cid         cid.Cid
+	PinErrorMsg string
+}
+
+// DagPutCmd is a command for adding a dag node
 var DagPutCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
-		Tagline: "Add a dag node to ipfs.",
+	Helptext: cmds.HelpText{
+		Tagline: "Add a DAG node to IPFS.",
 		ShortDescription: `
 'ipfs dag put' accepts input from a file or stdin and parses it
 into an object of the specified format.
 `,
 	},
-	Arguments: []cmdkit.Argument{
-		cmdkit.FileArg("object data", true, true, "The object to put").EnableStdin(),
+	Arguments: []cmds.Argument{
+		cmds.FileArg("object data", true, true, "The object to put").EnableStdin(),
 	},
-	Options: []cmdkit.Option{
-		cmdkit.StringOption("format", "f", "Format that the object will be added as.").WithDefault("cbor"),
-		cmdkit.StringOption("input-enc", "Format that the input object will be.").WithDefault("json"),
-		cmdkit.BoolOption("pin", "Pin this object when adding."),
-		cmdkit.StringOption("hash", "Hash function to use").WithDefault(""),
+	Options: []cmds.Option{
+		cmds.StringOption("format", "f", "Format that the object will be added as.").WithDefault("cbor"),
+		cmds.StringOption("input-enc", "Format that the input object will be.").WithDefault("json"),
+		cmds.BoolOption("pin", "Pin this object when adding."),
+		cmds.StringOption("hash", "Hash function to use").WithDefault(""),
 	},
-	Run: func(req *cmds.Request, res cmds.ResponseEmitter, env cmds.Environment) error {
-		api, err := cmdenv.GetApi(env, req)
-		if err != nil {
-			return err
-		}
-
-		ienc, _ := req.Options["input-enc"].(string)
-		format, _ := req.Options["format"].(string)
-		hash, _ := req.Options["hash"].(string)
-		dopin, _ := req.Options["pin"].(bool)
-
-		// mhType tells inputParser which hash should be used. MaxUint64 means 'use
-		// default hash' (sha256 for cbor, sha1 for git..)
-		mhType := uint64(math.MaxUint64)
-
-		if hash != "" {
-			var ok bool
-			mhType, ok = mh.Names[hash]
-			if !ok {
-				return fmt.Errorf("%s in not a valid multihash name", hash)
-			}
-		}
-
-		var adder ipld.NodeAdder = api.Dag()
-		if dopin {
-			adder = api.Dag().Pinning()
-		}
-		b := ipld.NewBatch(req.Context, adder)
-
-		it := req.Files.Entries()
-		for it.Next() {
-			file := files.FileFromEntry(it)
-			if file == nil {
-				return fmt.Errorf("expected a regular file")
-			}
-			nds, err := coredag.ParseInputs(ienc, format, file, mhType, -1)
-			if err != nil {
-				return err
-			}
-			if len(nds) == 0 {
-				return fmt.Errorf("no node returned from ParseInputs")
-			}
-
-			for _, nd := range nds {
-				err := b.Add(req.Context, nd)
-				if err != nil {
-					return err
-				}
-			}
-
-			cid := nds[0].Cid()
-			if err := res.Emit(&OutputObject{Cid: cid}); err != nil {
-				return err
-			}
-		}
-		if it.Err() != nil {
-			return it.Err()
-		}
-
-		if err := b.Commit(); err != nil {
-			return err
-		}
-
-		return nil
-	},
+	Run:  dagPut,
 	Type: OutputObject{},
 	Encoders: cmds.EncoderMap{
 		cmds.Text: cmds.MakeTypedEncoder(func(req *cmds.Request, w io.Writer, out *OutputObject) error {
@@ -143,83 +96,33 @@ into an object of the specified format.
 	},
 }
 
+// DagGetCmd is a command for getting a dag node from IPFS
 var DagGetCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
-		Tagline: "Get a dag node from ipfs.",
+	Helptext: cmds.HelpText{
+		Tagline: "Get a DAG node from IPFS.",
 		ShortDescription: `
-'ipfs dag get' fetches a dag node from ipfs and prints it out in the specified
+'ipfs dag get' fetches a DAG node from IPFS and prints it out in the specified
 format.
 `,
 	},
-	Arguments: []cmdkit.Argument{
-		cmdkit.StringArg("ref", true, false, "The object to get").EnableStdin(),
+	Arguments: []cmds.Argument{
+		cmds.StringArg("ref", true, false, "The object to get").EnableStdin(),
 	},
-	Run: func(req *cmds.Request, res cmds.ResponseEmitter, env cmds.Environment) error {
-		api, err := cmdenv.GetApi(env, req)
-		if err != nil {
-			return err
-		}
-
-		p, err := iface.ParsePath(req.Arguments[0])
-		if err != nil {
-			return err
-		}
-
-		rp, err := api.ResolvePath(req.Context, p)
-		if err != nil {
-			return err
-		}
-
-		obj, err := api.Dag().Get(req.Context, rp.Cid())
-		if err != nil {
-			return err
-		}
-
-		var out interface{} = obj
-		if len(rp.Remainder()) > 0 {
-			rem := strings.Split(rp.Remainder(), "/")
-			final, _, err := obj.Resolve(rem)
-			if err != nil {
-				return err
-			}
-			out = final
-		}
-		return cmds.EmitOnce(res, &out)
-	},
+	Run: dagGet,
 }
 
 // DagResolveCmd returns address of highest block within a path and a path remainder
 var DagResolveCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
-		Tagline: "Resolve ipld block",
+	Helptext: cmds.HelpText{
+		Tagline: "Resolve IPLD block.",
 		ShortDescription: `
-'ipfs dag resolve' fetches a dag node from ipfs, prints it's address and remaining path.
+'ipfs dag resolve' fetches a DAG node from IPFS, prints its address and remaining path.
 `,
 	},
-	Arguments: []cmdkit.Argument{
-		cmdkit.StringArg("ref", true, false, "The path to resolve").EnableStdin(),
+	Arguments: []cmds.Argument{
+		cmds.StringArg("ref", true, false, "The path to resolve").EnableStdin(),
 	},
-	Run: func(req *cmds.Request, res cmds.ResponseEmitter, env cmds.Environment) error {
-		api, err := cmdenv.GetApi(env, req)
-		if err != nil {
-			return err
-		}
-
-		p, err := iface.ParsePath(req.Arguments[0])
-		if err != nil {
-			return err
-		}
-
-		rp, err := api.ResolvePath(req.Context, p)
-		if err != nil {
-			return err
-		}
-
-		return cmds.EmitOnce(res, &ResolveOutput{
-			Cid:     rp.Cid(),
-			RemPath: rp.Remainder(),
-		})
-	},
+	Run: dagResolve,
 	Encoders: cmds.EncoderMap{
 		cmds.Text: cmds.MakeTypedEncoder(func(req *cmds.Request, w io.Writer, out *ResolveOutput) error {
 			var (
@@ -243,7 +146,7 @@ var DagResolveCmd = &cmds.Command{
 			}
 			p := enc.Encode(out.Cid)
 			if out.RemPath != "" {
-				p = path.Join([]string{p, out.RemPath})
+				p = ipfspath.Join([]string{p, out.RemPath})
 			}
 
 			fmt.Fprint(w, p)
@@ -251,4 +154,139 @@ var DagResolveCmd = &cmds.Command{
 		}),
 	},
 	Type: ResolveOutput{},
+}
+
+type importResult struct {
+	roots map[cid.Cid]struct{}
+	err   error
+}
+
+// DagImportCmd is a command for importing a car to ipfs
+var DagImportCmd = &cmds.Command{
+	Helptext: cmds.HelpText{
+		Tagline: "Import the contents of .car files",
+		ShortDescription: `
+'ipfs dag import' imports all blocks present in supplied .car
+( Content Address aRchive ) files, recursively pinning any roots
+specified in the CAR file headers, unless --pin-roots is set to false.
+
+Note:
+  This command will import all blocks in the CAR file, not just those
+  reachable from the specified roots. However, these other blocks will
+  not be pinned and may be garbage collected later.
+
+  The pinning of the roots happens after all car files are processed,
+  permitting import of DAGs spanning multiple files.
+
+  Pinning takes place in offline-mode exclusively, one root at a time.
+  If the combination of blocks from the imported CAR files and what is
+  currently present in the blockstore does not represent a complete DAG,
+  pinning of that individual root will fail.
+
+Maximum supported CAR version: 1
+`,
+	},
+	Arguments: []cmds.Argument{
+		cmds.FileArg("path", true, true, "The path of a .car file.").EnableStdin(),
+	},
+	Options: []cmds.Option{
+		cmds.BoolOption(silentOptionName, "No output."),
+		cmds.BoolOption(pinRootsOptionName, "Pin optional roots listed in the .car headers after importing.").WithDefault(true),
+	},
+	Type: CarImportOutput{},
+	Run:  dagImport,
+	Encoders: cmds.EncoderMap{
+		cmds.Text: cmds.MakeTypedEncoder(func(req *cmds.Request, w io.Writer, event *CarImportOutput) error {
+
+			silent, _ := req.Options[silentOptionName].(bool)
+			if silent {
+				return nil
+			}
+
+			enc, err := cmdenv.GetLowLevelCidEncoder(req)
+			if err != nil {
+				return err
+			}
+
+			if event.Root.PinErrorMsg != "" {
+				event.Root.PinErrorMsg = fmt.Sprintf("FAILED: %s", event.Root.PinErrorMsg)
+			} else {
+				event.Root.PinErrorMsg = "success"
+			}
+
+			_, err = fmt.Fprintf(
+				w,
+				"Pinned root\t%s\t%s\n",
+				enc.Encode(event.Root.Cid),
+				event.Root.PinErrorMsg,
+			)
+			return err
+		}),
+	},
+}
+
+// DagExportCmd is a command for exporting an ipfs dag to a car
+var DagExportCmd = &cmds.Command{
+	Helptext: cmds.HelpText{
+		Tagline: "Streams the selected DAG as a .car stream on stdout.",
+		ShortDescription: `
+'ipfs dag export' fetches a DAG and streams it out as a well-formed .car file.
+Note that at present only single root selections / .car files are supported.
+The output of blocks happens in strict DAG-traversal, first-seen, order.
+`,
+	},
+	Arguments: []cmds.Argument{
+		cmds.StringArg("root", true, false, "CID of a root to recursively export").EnableStdin(),
+	},
+	Options: []cmds.Option{
+		cmds.BoolOption(progressOptionName, "p", "Display progress on CLI. Defaults to true when STDERR is a TTY."),
+	},
+	Run: dagExport,
+	PostRun: cmds.PostRunMap{
+		cmds.CLI: finishCLIExport,
+	},
+}
+
+// DagStat is a dag stat command response
+type DagStat struct {
+	Size      uint64
+	NumBlocks int64
+}
+
+func (s *DagStat) String() string {
+	return fmt.Sprintf("Size: %d, NumBlocks: %d", s.Size, s.NumBlocks)
+}
+
+// DagStatCmd is a command for getting size information about an ipfs-stored dag
+var DagStatCmd = &cmds.Command{
+	Helptext: cmds.HelpText{
+		Tagline: "Gets stats for a DAG.",
+		ShortDescription: `
+'ipfs dag stat' fetches a DAG and returns various statistics about it.
+Statistics include size and number of blocks.
+
+Note: This command skips duplicate blocks in reporting both size and the number of blocks
+`,
+	},
+	Arguments: []cmds.Argument{
+		cmds.StringArg("root", true, false, "CID of a DAG root to get statistics for").EnableStdin(),
+	},
+	Options: []cmds.Option{
+		cmds.BoolOption(progressOptionName, "p", "Return progressive data while reading through the DAG").WithDefault(true),
+	},
+	Run:  dagStat,
+	Type: DagStat{},
+	PostRun: cmds.PostRunMap{
+		cmds.CLI: finishCLIStat,
+	},
+	Encoders: cmds.EncoderMap{
+		cmds.Text: cmds.MakeTypedEncoder(func(req *cmds.Request, w io.Writer, event *DagStat) error {
+			_, err := fmt.Fprintf(
+				w,
+				"%v\n",
+				event,
+			)
+			return err
+		}),
+	},
 }

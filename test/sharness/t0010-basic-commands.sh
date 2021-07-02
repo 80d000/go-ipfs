@@ -41,6 +41,17 @@ test_expect_success "ipfs version --all has all required fields" '
   grep "Golang version" version_all.txt
 '
 
+test_expect_success "ipfs version deps succeeds" '
+  ipfs version deps >deps.txt
+'
+
+test_expect_success "ipfs version deps output looks good ( set \$GOIPFSTEST_SKIP_LOCAL_DEVTREE_DEPS_CHECK to skip this test )" '
+  head -1 deps.txt | grep "go-ipfs@(devel)" &&
+  [[ "$GOIPFSTEST_SKIP_LOCAL_DEVTREE_DEPS_CHECK" == "1" ]] ||
+  [[ $(tail -n +2 deps.txt | egrep -v -c "^[^ @]+@v[^ @]+( => [^ @]+@v[^ @]+)?$") -eq 0 ]] ||
+  test_fsh cat deps.txt
+'
+
 test_expect_success "'ipfs commands' succeeds" '
   ipfs commands >commands.txt
 '
@@ -56,9 +67,9 @@ test_expect_success "All sub-commands accept help" '
   while read -r cmd
   do
     ${cmd:0:4} help ${cmd:5} >/dev/null ||
-      { echo "$cmd doesnt accept --help"; echo 1 > fail; }
+      { echo "$cmd does not accept --help"; echo 1 > fail; }
     echo stuff | $cmd --help >/dev/null ||
-      { echo "$cmd doesnt accept --help when using stdin"; echo 1 > fail; }
+      { echo "$cmd does not accept --help when using stdin"; echo 1 > fail; }
   done <commands.txt
 
   if [ $(cat fail) = 1 ]; then
@@ -71,9 +82,9 @@ test_expect_success "All commands accept --help" '
   while read -r cmd
   do
     $cmd --help >/dev/null ||
-      { echo "$cmd doesnt accept --help"; echo 1 > fail; }
+      { echo "$cmd does not accept --help"; echo 1 > fail; }
     echo stuff | $cmd --help >/dev/null ||
-      { echo "$cmd doesnt accept --help when using stdin"; echo 1 > fail; }
+      { echo "$cmd does not accept --help when using stdin"; echo 1 > fail; }
   done <commands.txt
 
   if [ $(cat fail) = 1 ]; then
@@ -83,6 +94,7 @@ test_expect_success "All commands accept --help" '
 
 test_expect_failure "All ipfs root commands are mentioned in base helptext" '
   echo 0 > fail
+  ipfs --help > help.txt
   cut -d" " -f 2 commands.txt | grep -v ipfs | sort -u | \
   while read cmd
   do
@@ -113,7 +125,7 @@ test_expect_success "All ipfs commands fail when passed a bad flag" '
   echo 0 > fail
   while read -r cmd
   do
-    test_must_fail $cmd --badflag >/dev/null ||
+    test_must_fail $cmd --badflag >/dev/null 2>&1 ||
       { echo "$cmd exit with code 0 when passed --badflag"; echo 1 > fail; }
   done <commands.txt
 

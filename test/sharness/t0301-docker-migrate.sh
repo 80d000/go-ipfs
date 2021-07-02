@@ -10,8 +10,13 @@ test_description="Test docker image migration"
 
 # if in travis CI on OSX, docker is not available
 if ! test_have_prereq DOCKER; then
-  skip_all='skipping docker tests, docker not available'
+  skip_all='skipping '$test_description', docker not available'
 
+  test_done
+fi
+
+if ! test_have_prereq SOCAT; then
+  skip_all="skipping '$test_description': socat is not available"
   test_done
 fi
 
@@ -21,7 +26,7 @@ TEST_TESTS_DIR=$(dirname "$TEST_SCRIPTS_DIR")
 APP_ROOT_DIR=$(dirname "$TEST_TESTS_DIR")
 
 test_expect_success "docker image build succeeds" '
-  docker_build "$TEST_TESTS_DIR/../Dockerfile.fast" "$APP_ROOT_DIR" >actual &&
+  docker_build "$TEST_TESTS_DIR/../Dockerfile" "$APP_ROOT_DIR" >actual &&
   IMAGE_ID=$(tail -n1 actual | cut -d " " -f 3)
 '
 
@@ -39,7 +44,7 @@ test_expect_success "setup http response" '
 '
 
 pretend_server() {
-  cat vers_resp | nc -l -i 1 -p 17233
+    socat tcp-listen:17233,fork,bind=127.0.0.1,reuseaddr 'SYSTEM:cat vers_resp'!!STDERR &
 }
 
 test_expect_success "startup fake dists server" '

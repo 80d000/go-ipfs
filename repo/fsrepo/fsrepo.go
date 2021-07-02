@@ -7,26 +7,25 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 
-	filestore "github.com/ipfs/go-ipfs/filestore"
-	keystore "github.com/ipfs/go-ipfs/keystore"
+	filestore "github.com/ipfs/go-filestore"
+	keystore "github.com/ipfs/go-ipfs-keystore"
 	repo "github.com/ipfs/go-ipfs/repo"
 	"github.com/ipfs/go-ipfs/repo/common"
-	mfsr "github.com/ipfs/go-ipfs/repo/fsrepo/migrations"
 	dir "github.com/ipfs/go-ipfs/thirdparty/dir"
 
-	ma "gx/ipfs/QmNTCey11oxhb1AxDnQBRHtdhap6Ctud872NjAYPYYXPuc/go-multiaddr"
-	util "gx/ipfs/QmNohiVssaPw3KVLZik59DBVGTSm2dGvYT9eoXt5DQ36Yz/go-ipfs-util"
-	config "gx/ipfs/QmTbcMKv6GU3fxhnNcbzYChdox9Fdd7VpucM3PQ7UWjX3D/go-ipfs-config"
-	serialize "gx/ipfs/QmTbcMKv6GU3fxhnNcbzYChdox9Fdd7VpucM3PQ7UWjX3D/go-ipfs-config/serialize"
-	lockfile "gx/ipfs/QmcWjZkQxyPMkgZRpda4hqWwaD6E1yqCvcxZfxbt98CEAK/go-fs-lock"
-	logging "gx/ipfs/QmcuXC5cxs79ro2cUuHs4HQ2bkDLJUYokwL8aivcX6HW3C/go-log"
-	measure "gx/ipfs/QmdCQgMgoMjur6D15ZB3z1LodiSP3L6EBHMyVx4ekqzRWA/go-ds-measure"
-	homedir "gx/ipfs/QmdcULN1WCzgoQmcCaUAmEhwcxHYsDrbZ2LvRJKCL8dMrK/go-homedir"
-	ds "gx/ipfs/Qmf4xQhNomPNhrtZc67qSnfJSjxjXs9LWvknJtSXwimPrM/go-datastore"
+	ds "github.com/ipfs/go-datastore"
+	measure "github.com/ipfs/go-ds-measure"
+	lockfile "github.com/ipfs/go-fs-lock"
+	config "github.com/ipfs/go-ipfs-config"
+	serialize "github.com/ipfs/go-ipfs-config/serialize"
+	util "github.com/ipfs/go-ipfs-util"
+	"github.com/ipfs/go-ipfs/repo/fsrepo/migrations"
+	logging "github.com/ipfs/go-log"
+	homedir "github.com/mitchellh/go-homedir"
+	ma "github.com/multiformats/go-multiaddr"
 )
 
 // LockFile is the filename of the repo lock, relative to config dir
@@ -36,7 +35,7 @@ const LockFile = "repo.lock"
 var log = logging.Logger("fsrepo")
 
 // version number that we are currently expecting to see
-var RepoVersion = 7
+var RepoVersion = 11
 
 var migrationInstructions = `See https://github.com/ipfs/fs-repo-migrations/blob/master/run.md
 Sorry for the inconvenience. In the future, these will run automatically.`
@@ -143,7 +142,7 @@ func open(repoPath string) (repo.Repo, error) {
 	}()
 
 	// Check version, and error out if not matching
-	ver, err := mfsr.RepoPath(r.path).Version()
+	ver, err := migrations.RepoVersion(r.path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, ErrNoVersion
@@ -292,7 +291,7 @@ func Init(repoPath string, conf *config.Config) error {
 		return err
 	}
 
-	if err := mfsr.RepoPath(repoPath).WriteVersion(RepoVersion); err != nil {
+	if err := migrations.WriteRepoVersion(repoPath, RepoVersion); err != nil {
 		return err
 	}
 
@@ -359,13 +358,30 @@ func (r *FSRepo) Path() string {
 
 // SetAPIAddr writes the API Addr to the /api file.
 func (r *FSRepo) SetAPIAddr(addr ma.Multiaddr) error {
-	f, err := os.Create(filepath.Join(r.path, apiFile))
+	// Create a temp file to write the address, so that we don't leave empty file when the
+	// program crashes after creating the file.
+	f, err := os.Create(filepath.Join(r.path, "."+apiFile+".tmp"))
 	if err != nil {
 		return err
 	}
-	defer f.Close()
 
-	_, err = f.WriteString(addr.String())
+	if _, err = f.WriteString(addr.String()); err != nil {
+		return err
+	}
+	if err = f.Close(); err != nil {
+		return err
+	}
+
+	// Atomically rename the temp file to the correct file name.
+	if err = os.Rename(filepath.Join(r.path, "."+apiFile+".tmp"), filepath.Join(r.path,
+		apiFile)); err == nil {
+		return nil
+	}
+	// Remove the temp file when rename return error
+	if err1 := os.Remove(filepath.Join(r.path, "."+apiFile+".tmp")); err1 != nil {
+		return fmt.Errorf("File Rename error: %s, File remove error: %s", err.Error(),
+			err1.Error())
+	}
 	return err
 }
 
@@ -403,7 +419,7 @@ func (r *FSRepo) openDatastore() error {
 		return fmt.Errorf("required Datastore.Spec entry missing from config file")
 	}
 	if r.config.Datastore.NoSync {
-		log.Warning("NoSync is now deprecated in favor of datastore specific settings. If you want to disable fsync on flatfs set 'sync' to false. See https://github.com/ipfs/go-ipfs/blob/master/docs/datastores.md#flatfs.")
+		log.Warn("NoSync is now deprecated in favor of datastore specific settings. If you want to disable fsync on flatfs set 'sync' to false. See https://github.com/ipfs/go-ipfs/blob/master/docs/datastores.md#flatfs.")
 	}
 
 	dsc, err := AnyDatastoreConfig(r.config.Datastore.Spec)
@@ -457,7 +473,7 @@ func (r *FSRepo) Close() error {
 
 	err := os.Remove(filepath.Join(r.path, apiFile))
 	if err != nil && !os.IsNotExist(err) {
-		log.Warning("error removing api file: ", err)
+		log.Warn("error removing api file: ", err)
 	}
 
 	if err := r.ds.Close(); err != nil {
@@ -598,6 +614,7 @@ func (r *FSRepo) SetConfigKey(key string, value interface{}) error {
 	if err != nil {
 		return err
 	}
+	// Load into a map so we don't end up writing any additional defaults to the config file.
 	var mapconf map[string]interface{}
 	if err := serialize.ReadConfigFile(filename, &mapconf); err != nil {
 		return err
@@ -611,42 +628,7 @@ func (r *FSRepo) SetConfigKey(key string, value interface{}) error {
 		return err
 	}
 
-	// Get the type of the value associated with the key
-	oldValue, err := common.MapGetKV(mapconf, key)
-	ok := true
-	if err != nil {
-		// key-value does not exist yet
-		switch v := value.(type) {
-		case string:
-			value, err = strconv.ParseBool(v)
-			if err != nil {
-				value, err = strconv.Atoi(v)
-				if err != nil {
-					value, err = strconv.ParseFloat(v, 32)
-					if err != nil {
-						value = v
-					}
-				}
-			}
-		default:
-		}
-	} else {
-		switch oldValue.(type) {
-		case bool:
-			value, ok = value.(bool)
-		case int:
-			value, ok = value.(int)
-		case float32:
-			value, ok = value.(float32)
-		case string:
-			value, ok = value.(string)
-		default:
-		}
-		if !ok {
-			return fmt.Errorf("wrong config type, expected %T", oldValue)
-		}
-	}
-
+	// Set the key in the map.
 	if err := common.MapSetKV(mapconf, key, value); err != nil {
 		return err
 	}

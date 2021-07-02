@@ -1,5 +1,4 @@
-// +build !nofuse
-// +build !windows
+// +build !nofuse,!windows,!openbsd,!netbsd,!plan9
 
 package mount
 
@@ -9,9 +8,9 @@ import (
 	"sync"
 	"time"
 
-	"gx/ipfs/QmSF8fPo3jgVBAy8fpdjjYqgG87dkJgUprRBHRd2tmfgpP/goprocess"
-	"gx/ipfs/QmSJBsmLP1XMjv8hxYg2rUMdPDB7YUpyBo9idjrJ6Cmq6F/fuse"
-	"gx/ipfs/QmSJBsmLP1XMjv8hxYg2rUMdPDB7YUpyBo9idjrJ6Cmq6F/fuse/fs"
+	"bazil.org/fuse"
+	"bazil.org/fuse/fs"
+	"github.com/jbenet/goprocess"
 )
 
 var ErrNotMounted = errors.New("not mounted")
@@ -56,7 +55,7 @@ func NewMount(p goprocess.Process, fsys fs.FS, mountpoint string, allow_other bo
 
 	// launch the mounting process.
 	if err := m.mount(); err != nil {
-		m.Unmount() // just in case.
+		_ = m.Unmount() // just in case.
 		return nil, err
 	}
 
@@ -111,7 +110,7 @@ func (m *mount) unmount() error {
 		m.setActive(false)
 		return nil
 	}
-	log.Warningf("fuse unmount err: %s", err)
+	log.Warnf("fuse unmount err: %s", err)
 
 	// try closing the fuseConn
 	err = m.fuseConn.Close()
@@ -119,7 +118,7 @@ func (m *mount) unmount() error {
 		m.setActive(false)
 		return nil
 	}
-	log.Warningf("fuse conn error: %s", err)
+	log.Warnf("fuse conn error: %s", err)
 
 	// try mount.ForceUnmountManyTimes
 	if err := ForceUnmountManyTimes(m, 10); err != nil {

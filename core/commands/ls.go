@@ -8,18 +8,21 @@ import (
 	"text/tabwriter"
 
 	cmdenv "github.com/ipfs/go-ipfs/core/commands/cmdenv"
-	iface "github.com/ipfs/go-ipfs/core/coreapi/interface"
-	options "github.com/ipfs/go-ipfs/core/coreapi/interface/options"
 
-	cmds "gx/ipfs/QmR77mMvvh8mJBBWQmBfQBu8oD38NUN4KE9SL2gDgAQNc6/go-ipfs-cmds"
-	cmdkit "gx/ipfs/Qmde5VP1qUkyQXKCfmEUA7bP64V2HAptbJ7phuPp7jXWwg/go-ipfs-cmdkit"
+	cmds "github.com/ipfs/go-ipfs-cmds"
+	unixfs "github.com/ipfs/go-unixfs"
+	unixfs_pb "github.com/ipfs/go-unixfs/pb"
+	iface "github.com/ipfs/interface-go-ipfs-core"
+	options "github.com/ipfs/interface-go-ipfs-core/options"
+	path "github.com/ipfs/interface-go-ipfs-core/path"
 )
 
 // LsLink contains printable data for a single ipld link in ls output
 type LsLink struct {
 	Name, Hash string
 	Size       uint64
-	Type       iface.FileType
+	Type       unixfs_pb.Data_DataType
+	Target     string
 }
 
 // LsObject is an element of LsOutput
@@ -43,7 +46,7 @@ const (
 )
 
 var LsCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
+	Helptext: cmds.HelpText{
 		Tagline: "List directory contents for Unix filesystem objects.",
 		ShortDescription: `
 Displays the contents of an IPFS or IPNS object(s) at the given path, with
@@ -55,14 +58,14 @@ The JSON output contains type information.
 `,
 	},
 
-	Arguments: []cmdkit.Argument{
-		cmdkit.StringArg("ipfs-path", true, true, "The path to the IPFS object(s) to list links from.").EnableStdin(),
+	Arguments: []cmds.Argument{
+		cmds.StringArg("ipfs-path", true, true, "The path to the IPFS object(s) to list links from.").EnableStdin(),
 	},
-	Options: []cmdkit.Option{
-		cmdkit.BoolOption(lsHeadersOptionNameTime, "v", "Print table headers (Hash, Size, Name)."),
-		cmdkit.BoolOption(lsResolveTypeOptionName, "Resolve linked objects to find out their types.").WithDefault(true),
-		cmdkit.BoolOption(lsSizeOptionName, "Resolve linked objects to find out their file size.").WithDefault(true),
-		cmdkit.BoolOption(lsStreamOptionName, "s", "Enable exprimental streaming of directory entries as they are traversed."),
+	Options: []cmds.Option{
+		cmds.BoolOption(lsHeadersOptionNameTime, "v", "Print table headers (Hash, Size, Name)."),
+		cmds.BoolOption(lsResolveTypeOptionName, "Resolve linked objects to find out their types.").WithDefault(true),
+		cmds.BoolOption(lsSizeOptionName, "Resolve linked objects to find out their file size.").WithDefault(true),
+		cmds.BoolOption(lsStreamOptionName, "s", "Enable experimental streaming of directory entries as they are traversed."),
 	},
 	Run: func(req *cmds.Request, res cmds.ResponseEmitter, env cmds.Environment) error {
 		api, err := cmdenv.GetApi(env, req)
@@ -128,12 +131,7 @@ The JSON output contains type information.
 		}
 
 		for i, fpath := range paths {
-			p, err := iface.ParsePath(fpath)
-			if err != nil {
-				return err
-			}
-
-			results, err := api.Unixfs().Ls(req.Context, p,
+			results, err := api.Unixfs().Ls(req.Context, path.New(fpath),
 				options.Unixfs.ResolveChildren(resolveSize || resolveType))
 			if err != nil {
 				return err
@@ -144,12 +142,22 @@ The JSON output contains type information.
 				if link.Err != nil {
 					return link.Err
 				}
+				var ftype unixfs_pb.Data_DataType
+				switch link.Type {
+				case iface.TFile:
+					ftype = unixfs.TFile
+				case iface.TDirectory:
+					ftype = unixfs.TDirectory
+				case iface.TSymlink:
+					ftype = unixfs.TSymlink
+				}
 				lsLink := LsLink{
-					Name: link.Link.Name,
-					Hash: enc.Encode(link.Link.Cid),
+					Name: link.Name,
+					Hash: enc.Encode(link.Cid),
 
-					Size: link.Size,
-					Type: link.Type,
+					Size:   link.Size,
+					Type:   ftype,
+					Target: link.Target,
 				}
 				if err := processLink(paths[i], lsLink); err != nil {
 					return err
@@ -227,18 +235,23 @@ func tabularOutput(req *cmds.Request, w io.Writer, out *LsOutput, lastObjectHash
 		}
 
 		for _, link := range object.Links {
-			s := "%[1]s\t%[3]s\n"
-
-			switch {
-			case link.Type == iface.TDirectory && size:
-				s = "%[1]s\t-\t%[3]s/\n"
-			case link.Type == iface.TDirectory && !size:
-				s = "%[1]s\t%[3]s/\n"
-			case size:
-				s = "%s\t%v\t%s\n"
+			var s string
+			switch link.Type {
+			case unixfs.TDirectory, unixfs.THAMTShard, unixfs.TMetadata:
+				if size {
+					s = "%[1]s\t-\t%[3]s/\n"
+				} else {
+					s = "%[1]s\t%[3]s/\n"
+				}
+			default:
+				if size {
+					s = "%s\t%v\t%s\n"
+				} else {
+					s = "%[1]s\t%[3]s\n"
+				}
 			}
 
-			fmt.Fprintf(tw, s, link.Hash, link.Size, link.Name)
+			fmt.Fprintf(tw, s, link.Hash, link.Size, cmdenv.EscNonPrint(link.Name))
 		}
 	}
 	tw.Flush()

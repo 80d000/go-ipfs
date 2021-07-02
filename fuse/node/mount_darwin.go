@@ -11,8 +11,8 @@ import (
 
 	core "github.com/ipfs/go-ipfs/core"
 
-	unix "gx/ipfs/QmVGjyM9i2msKvLXwh9VosCTgP4mL91kC7hDmqnwTTx6Hu/sys/unix"
-	"gx/ipfs/QmYRGECuvQnRX73fcvPnGbYijBcGN2HbKZQ7jh26qmLiHG/semver"
+	"github.com/blang/semver/v4"
+	unix "golang.org/x/sys/unix"
 )
 
 func init() {
@@ -22,10 +22,10 @@ func init() {
 
 // dontCheckOSXFUSEConfigKey is a key used to let the user tell us to
 // skip fuse checks.
-var dontCheckOSXFUSEConfigKey = "DontCheckOSXFUSE"
+const dontCheckOSXFUSEConfigKey = "DontCheckOSXFUSE"
 
 // fuseVersionPkg is the go pkg url for fuse-version
-var fuseVersionPkg = "github.com/jbenet/go-fuse-version/fuse-version"
+const fuseVersionPkg = "github.com/jbenet/go-fuse-version/fuse-version"
 
 // errStrFuseRequired is returned when we're sure the user does not have fuse.
 var errStrFuseRequired = `OSXFUSE not found.
@@ -42,7 +42,7 @@ For more help, see:
 `
 
 // errStrNoFuseHeaders is included in the output of `go get <fuseVersionPkg>` if there
-// are no fuse headers. this means they dont have OSXFUSE installed.
+// are no fuse headers. this means they don't have OSXFUSE installed.
 var errStrNoFuseHeaders = "no such file or directory: '/usr/local/lib/libosxfuse.dylib'"
 
 var errStrUpgradeFuse = `OSXFUSE version %s not supported.
@@ -58,7 +58,12 @@ For more help, see:
 	https://github.com/ipfs/go-ipfs/issues/177
 `
 
-var errStrNeedFuseVersion = `unable to check fuse version.
+type errNeedFuseVersion struct {
+	cause string
+}
+
+func (me errNeedFuseVersion) Error() string {
+	return fmt.Sprintf(`unable to check fuse version.
 
 Dear User,
 
@@ -74,12 +79,13 @@ Please install it yourself by running:
 You can also stop ipfs from running these checks and use whatever OSXFUSE
 version you have by running:
 
-	ipfs --json config %s true
+	ipfs config --bool %s true
 
 [1]: https://github.com/ipfs/go-ipfs/issues/177
 [2]: https://github.com/ipfs/go-ipfs/pull/533
 [3]: %s
-`
+`, fuseVersionPkg, dontCheckOSXFUSEConfigKey, me.cause)
+}
 
 var errStrFailedToRunFuseVersion = `unable to check fuse version.
 
@@ -104,7 +110,7 @@ You should see something like this:
 Just make sure the number is 2.7.2 or higher. You can then stop ipfs from
 trying to run these checks with:
 
-	ipfs config %s true
+	ipfs config --bool %s true
 
 [1]: https://github.com/ipfs/go-ipfs/issues/177
 [2]: https://github.com/ipfs/go-ipfs/pull/533
@@ -114,7 +120,7 @@ trying to run these checks with:
 var errStrFixConfig = `config key invalid: %s %v
 You may be able to get this error to go away by setting it again:
 
-	ipfs config %s true
+	ipfs config --bool %s true
 
 Either way, please tell us at: http://github.com/ipfs/go-ipfs/issues
 `
@@ -197,27 +203,27 @@ func ensureFuseVersionIsInstalled() error {
 
 	// try installing it...
 	log.Debug("fuse-version: no fuse-version. attempting to install.")
-	cmd := exec.Command("go", "get", "github.com/jbenet/go-fuse-version/fuse-version")
+	cmd := exec.Command("go", "install", "github.com/jbenet/go-fuse-version/fuse-version")
 	cmdout := new(bytes.Buffer)
 	cmd.Stdout = cmdout
 	cmd.Stderr = cmdout
 	if err := cmd.Run(); err != nil {
-		// Ok, install fuse-version failed. is it they dont have fuse?
+		// Ok, install fuse-version failed. is it they don't have fuse?
 		cmdoutstr := cmdout.String()
 		if strings.Contains(cmdoutstr, errStrNoFuseHeaders) {
-			// yes! it is! they dont have fuse!
+			// yes! it is! they don't have fuse!
 			return fmt.Errorf(errStrFuseRequired)
 		}
 
 		log.Debug("fuse-version: failed to install.")
 		s := err.Error() + "\n" + cmdoutstr
-		return fmt.Errorf(errStrNeedFuseVersion, fuseVersionPkg, dontCheckOSXFUSEConfigKey, s)
+		return errNeedFuseVersion{s}
 	}
 
 	// ok, try again...
 	if _, err := exec.LookPath("fuse-version"); err != nil {
 		log.Debug("fuse-version: failed to install?")
-		return fmt.Errorf(errStrNeedFuseVersion, fuseVersionPkg, dontCheckOSXFUSEConfigKey, err)
+		return errNeedFuseVersion{err.Error()}
 	}
 
 	log.Debug("fuse-version: install success")
@@ -227,7 +233,7 @@ func ensureFuseVersionIsInstalled() error {
 func userAskedToSkipFuseCheck(node *core.IpfsNode) (skip bool, err error) {
 	val, err := node.Repo.GetConfigKey(dontCheckOSXFUSEConfigKey)
 	if err != nil {
-		return false, nil // failed to get config value. dont skip check.
+		return false, nil // failed to get config value. don't skip check.
 	}
 
 	switch val := val.(type) {
@@ -236,7 +242,7 @@ func userAskedToSkipFuseCheck(node *core.IpfsNode) (skip bool, err error) {
 	case bool:
 		return val, nil
 	default:
-		// got config value, but it's invalid... dont skip check, ask the user to fix it...
+		// got config value, but it's invalid... don't skip check, ask the user to fix it...
 		return false, fmt.Errorf(errStrFixConfig, dontCheckOSXFUSEConfigKey, val,
 			dontCheckOSXFUSEConfigKey)
 	}

@@ -48,7 +48,7 @@ test_dag_cmd() {
   '
 
   test_expect_success "output looks correct" '
-    EXPHASH="zdpuAsXfkHapxohc8LtsCzYiAsy84ESqKRD8eWuY64tt9r2CE"
+    EXPHASH="bafyreidjtjfmavdk7epvztob2m5vlm3pxp3gjmpyewro4qlbw5n4f4iz64"
     test $EXPHASH = $IPLDHASH
   '
 
@@ -97,7 +97,7 @@ test_dag_cmd() {
     ipfs pin add $EXPHASH
   '
 
-  test_expect_success "after gc, objects still acessible" '
+  test_expect_success "after gc, objects still accessible" '
     ipfs repo gc > /dev/null &&
     ipfs refs -r --timeout=2s $EXPHASH > /dev/null
   '
@@ -110,7 +110,7 @@ test_dag_cmd() {
     grep "{\"/\":\"" ipld_obj_out > /dev/null
   '
 
-  test_expect_success "retreived object hashes back correctly" '
+  test_expect_success "retrieved object hashes back correctly" '
     IPLDHASH2=$(cat ipld_obj_out | ipfs dag put) &&
     test "$IPLDHASH" = "$IPLDHASH2"
   '
@@ -139,13 +139,13 @@ test_dag_cmd() {
 
   test_expect_success "non-canonical cbor input is normalized" '
     HASH=$(cat ../t0053-dag-data/non-canon.cbor | ipfs dag put --format=cbor --input-enc=raw) &&
-    test $HASH = "zdpuAmxF8q6iTUtkB3xtEYzmc5Sw762qwQJftt5iW8NTWLtjC" ||
+    test $HASH = "bafyreiawx7ona7oa2ptcoh6vwq4q6bmd7x2ibtkykld327bgb7t73ayrqm" ||
     test_fsh echo $HASH
   '
 
   test_expect_success "non-canonical cbor input is normalized with input-enc cbor" '
     HASH=$(cat ../t0053-dag-data/non-canon.cbor | ipfs dag put --format=cbor --input-enc=cbor) &&
-    test $HASH = "zdpuAmxF8q6iTUtkB3xtEYzmc5Sw762qwQJftt5iW8NTWLtjC" ||
+    test $HASH = "bafyreiawx7ona7oa2ptcoh6vwq4q6bmd7x2ibtkykld327bgb7t73ayrqm" ||
     test_fsh echo $HASH
   '
 
@@ -153,7 +153,7 @@ test_dag_cmd() {
     PINHASH=$(printf {\"foo\":\"bar\"} | ipfs dag put --pin=true)
   '
 
-  test_expect_success "after gc, objects still acessible" '
+  test_expect_success "after gc, objects still accessible" '
     ipfs repo gc > /dev/null &&
     ipfs refs -r --timeout=2s $PINHASH > /dev/null
   '
@@ -163,7 +163,7 @@ test_dag_cmd() {
   '
 
   test_expect_success "output looks correct" '
-    EXPHASH="zBwWX8u9LYZdCWqaryJW8QsBstghHSPy41nfhhFLY9qw1Vu2BWqnMFtk1jL3qCtEdGd7Kqw1HNPZv5z8LxP2eHGGDCdRE"
+    EXPHASH="bafyriqgae54zjl3bjebmbat2rjem4ewj6vni6jxohandmvk3bibfgv3sioyeidppsghvulryxats43br3b7afa6jy77x6gqzqaicer6ljicck"
     test $EXPHASH = $IPLDHASH
   '
 
@@ -205,8 +205,8 @@ test_dag_cmd() {
   '
 
   test_expect_success "dag put multiple files output looks good" '
-    echo zdpuAoKMEvka7gKGSjF9B3of1F5gE5MyMMywxTC13wCmouQrf > dag_put_exp &&
-    echo zdpuAogmDEvpvGjMFsNTGDEU1JMYe6v69oxR8nG81EurmGHMj >> dag_put_exp &&
+    echo bafyreiblaotetvwobe7cu2uqvnddr6ew2q3cu75qsoweulzku2egca4dxq > dag_put_exp &&
+    echo bafyreibqp7zvp6dvrqhtkbwuzzk7jhtmfmngtiqjajqpm6gtw55o7kqzfi >> dag_put_exp &&
 
     test_cmp dag_put_exp dag_put_out
   '
@@ -267,6 +267,41 @@ test_dag_cmd() {
     test_cmp resolve_hash_exp resolve_hash &&
     test_cmp resolve_obj_exp resolve_obj &&
     test_cmp resolve_data_exp resolve_data
+  '
+
+  test_expect_success "dag stat of simple IPLD object" '
+    ipfs dag stat $NESTED_HASH > actual_stat_inner_ipld_obj &&
+    echo "Size: 15, NumBlocks: 1" > exp_stat_inner_ipld_obj &&
+    test_cmp exp_stat_inner_ipld_obj actual_stat_inner_ipld_obj &&
+    ipfs dag stat $HASH > actual_stat_ipld_obj &&
+    echo "Size: 61, NumBlocks: 2" > exp_stat_ipld_obj &&
+    test_cmp exp_stat_ipld_obj actual_stat_ipld_obj
+  '
+
+  test_expect_success "dag stat of simple UnixFS object" '
+    BASIC_UNIXFS=$(echo "1234" | ipfs add --pin=false -q) &&
+    ipfs dag stat $BASIC_UNIXFS > actual_stat_basic_unixfs &&
+    echo "Size: 13, NumBlocks: 1" > exp_stat_basic_unixfs &&
+    test_cmp exp_stat_basic_unixfs actual_stat_basic_unixfs
+  '
+
+  # The multiblock file is just 10000000 copies of the number 1
+  # As most of its data is replicated it should have a small number of blocks
+  test_expect_success "dag stat of multiblock UnixFS object" '
+    MULTIBLOCK_UNIXFS=$(printf "1%.0s" {1..10000000} | ipfs add --pin=false -q) &&
+    ipfs dag stat $MULTIBLOCK_UNIXFS > actual_stat_multiblock_unixfs &&
+    echo "Size: 302582, NumBlocks: 3" > exp_stat_multiblock_unixfs &&
+    test_cmp exp_stat_multiblock_unixfs actual_stat_multiblock_unixfs
+  '
+
+  test_expect_success "dag stat of directory of UnixFS objects" '
+    mkdir -p unixfsdir &&
+    echo "1234" > unixfsdir/small.txt
+    printf "1%.0s" {1..10000000} > unixfsdir/many1s.txt &&
+    DIRECTORY_UNIXFS=$(ipfs add -r --pin=false -Q unixfsdir) &&
+    ipfs dag stat $DIRECTORY_UNIXFS > actual_stat_directory_unixfs &&
+    echo "Size: 302705, NumBlocks: 5" > exp_stat_directory_unixfs &&
+    test_cmp exp_stat_directory_unixfs actual_stat_directory_unixfs
   '
 }
 

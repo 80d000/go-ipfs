@@ -8,16 +8,15 @@ import (
 
 	cmdenv "github.com/ipfs/go-ipfs/core/commands/cmdenv"
 
-	peer "gx/ipfs/QmPJxxDsX2UbchSHobbYuvz7qnyJTFKvaKMzE2rZWJ4x5B/go-libp2p-peer"
-	humanize "gx/ipfs/QmPSBJL4momYnE7DcUyk2DVhD6rH488ZmHBGLbxNdhU44K/go-humanize"
-	cmds "gx/ipfs/QmR77mMvvh8mJBBWQmBfQBu8oD38NUN4KE9SL2gDgAQNc6/go-ipfs-cmds"
-	metrics "gx/ipfs/QmRN8cMBqfgLgrcaeK6vqUd7HuyvKbNnzaSj4TRBW9XvPQ/go-libp2p-metrics"
-	protocol "gx/ipfs/QmZNkThpqfVXs9GNbexPrfBbXSLNYeKrE7jwFM2oqHbyqN/go-libp2p-protocol"
-	cmdkit "gx/ipfs/Qmde5VP1qUkyQXKCfmEUA7bP64V2HAptbJ7phuPp7jXWwg/go-ipfs-cmdkit"
+	humanize "github.com/dustin/go-humanize"
+	cmds "github.com/ipfs/go-ipfs-cmds"
+	metrics "github.com/libp2p/go-libp2p-core/metrics"
+	peer "github.com/libp2p/go-libp2p-core/peer"
+	protocol "github.com/libp2p/go-libp2p-core/protocol"
 )
 
 var StatsCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
+	Helptext: cmds.HelpText{
 		Tagline: "Query IPFS statistics.",
 		ShortDescription: `'ipfs stats' is a set of commands to help look at statistics
 for your IPFS node.
@@ -30,6 +29,8 @@ for your IPFS node.`,
 		"bw":      statBwCmd,
 		"repo":    repoStatCmd,
 		"bitswap": bitswapStatCmd,
+		"dht":     statDhtCmd,
+		"provide": statProvideCmd,
 	},
 }
 
@@ -41,8 +42,8 @@ const (
 )
 
 var statBwCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
-		Tagline: "Print ipfs bandwidth information.",
+	Helptext: cmds.HelpText{
+		Tagline: "Print IPFS bandwidth information.",
 		ShortDescription: `'ipfs stats bw' prints bandwidth information for the ipfs daemon.
 It displays: TotalIn, TotalOut, RateIn, RateOut.
 		`,
@@ -77,11 +78,11 @@ Example:
     RateOut: 0B/s
 `,
 	},
-	Options: []cmdkit.Option{
-		cmdkit.StringOption(statPeerOptionName, "p", "Specify a peer to print bandwidth for."),
-		cmdkit.StringOption(statProtoOptionName, "t", "Specify a protocol to print bandwidth for."),
-		cmdkit.BoolOption(statPollOptionName, "Print bandwidth at an interval."),
-		cmdkit.StringOption(statIntervalOptionName, "i", `Time interval to wait between updating output, if 'poll' is true.
+	Options: []cmds.Option{
+		cmds.StringOption(statPeerOptionName, "p", "Specify a peer to print bandwidth for."),
+		cmds.StringOption(statProtoOptionName, "t", "Specify a protocol to print bandwidth for."),
+		cmds.BoolOption(statPollOptionName, "Print bandwidth at an interval."),
+		cmds.StringOption(statIntervalOptionName, "i", `Time interval to wait between updating output, if 'poll' is true.
 
     This accepts durations such as "300s", "1.5h" or "2h45m". Valid time units are:
     "ns", "us" (or "µs"), "ms", "s", "m", "h".`).WithDefault("1s"),
@@ -94,8 +95,8 @@ Example:
 		}
 
 		// Must be online!
-		if !nd.OnlineMode() {
-			return cmdkit.Errorf(cmdkit.ErrClient, ErrNotOnline.Error())
+		if !nd.IsOnline {
+			return cmds.Errorf(cmds.ErrClient, ErrNotOnline.Error())
 		}
 
 		if nd.Reporter == nil {
@@ -105,12 +106,12 @@ Example:
 		pstr, pfound := req.Options[statPeerOptionName].(string)
 		tstr, tfound := req.Options["proto"].(string)
 		if pfound && tfound {
-			return cmdkit.Errorf(cmdkit.ErrClient, "please only specify peer OR protocol")
+			return cmds.Errorf(cmds.ErrClient, "please only specify peer OR protocol")
 		}
 
 		var pid peer.ID
 		if pfound {
-			checkpid, err := peer.IDB58Decode(pstr)
+			checkpid, err := peer.Decode(pstr)
 			if err != nil {
 				return err
 			}

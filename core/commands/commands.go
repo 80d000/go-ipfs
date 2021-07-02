@@ -6,16 +6,14 @@
 package commands
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"os"
 	"sort"
 	"strings"
 
-	e "github.com/ipfs/go-ipfs/core/commands/e"
-
-	cmds "gx/ipfs/QmR77mMvvh8mJBBWQmBfQBu8oD38NUN4KE9SL2gDgAQNc6/go-ipfs-cmds"
-	"gx/ipfs/Qmde5VP1qUkyQXKCfmEUA7bP64V2HAptbJ7phuPp7jXWwg/go-ipfs-cmdkit"
+	"github.com/ipfs/go-ipfs-cmds"
 )
 
 type commandEncoder struct {
@@ -29,7 +27,7 @@ func (e *commandEncoder) Encode(v interface{}) error {
 	)
 
 	if cmd, ok = v.(*Command); !ok {
-		return fmt.Errorf(`core/commands: uenxpected type %T, expected *"core/commands".Command`, v)
+		return fmt.Errorf(`core/commands: unexpected type %T, expected *"core/commands".Command`, v)
 	}
 
 	for _, s := range cmdPathStrings(cmd, cmd.showOpts) {
@@ -62,13 +60,17 @@ const (
 // and returns a command that lists the subcommands in that root
 func CommandsCmd(root *cmds.Command) *cmds.Command {
 	return &cmds.Command{
-		Helptext: cmdkit.HelpText{
+		Helptext: cmds.HelpText{
 			Tagline:          "List all available commands.",
 			ShortDescription: `Lists all available commands (and subcommands) and exits.`,
 		},
-		Options: []cmdkit.Option{
-			cmdkit.BoolOption(flagsOptionName, "f", "Show command flags"),
+		Subcommands: map[string]*cmds.Command{
+			"completion": CompletionCmd(root),
 		},
+		Options: []cmds.Option{
+			cmds.BoolOption(flagsOptionName, "f", "Show command flags"),
+		},
+		Extra: CreateCmdExtras(SetDoesNotUseRepo(true)),
 		Run: func(req *cmds.Request, res cmds.ResponseEmitter, env cmds.Environment) error {
 			rootCmd := cmd2outputCmd("ipfs", root)
 			rootCmd.showOpts, _ = req.Options[flagsOptionName].(bool)
@@ -129,26 +131,46 @@ func cmdPathStrings(cmd *Command, showOptions bool) []string {
 	}
 
 	recurse("", cmd)
-	sort.Sort(sort.StringSlice(cmds))
+	sort.Strings(cmds)
 	return cmds
 }
 
-// changes here will also need to be applied at
-// - ./dag/dag.go
-// - ./object/object.go
-// - ./files/files.go
-// - ./unixfs/unixfs.go
-func unwrapOutput(i interface{}) (interface{}, error) {
-	var (
-		ch <-chan interface{}
-		ok bool
-	)
+func CompletionCmd(root *cmds.Command) *cmds.Command {
+	return &cmds.Command{
+		Helptext: cmds.HelpText{
+			Tagline: "Generate shell completions.",
+		},
+		NoRemote: true,
+		Subcommands: map[string]*cmds.Command{
+			"bash": {
+				Helptext: cmds.HelpText{
+					Tagline:          "Generate bash shell completions.",
+					ShortDescription: "Generates command completions for the bash shell.",
+					LongDescription: `
+Generates command completions for the bash shell.
 
-	if ch, ok = i.(<-chan interface{}); !ok {
-		return nil, e.TypeErr(ch, i)
+The simplest way to see it working is write the completions
+to a file and then source it:
+
+  > ipfs commands completion bash > ipfs-completion.bash
+  > source ./ipfs-completion.bash
+
+To install the completions permanently, they can be moved to
+/etc/bash_completion.d or sourced from your ~/.bashrc file.
+`,
+				},
+				NoRemote: true,
+				Run: func(req *cmds.Request, res cmds.ResponseEmitter, env cmds.Environment) error {
+					var buf bytes.Buffer
+					if err := writeBashCompletions(root, &buf); err != nil {
+						return err
+					}
+					res.SetLength(uint64(buf.Len()))
+					return res.Emit(&buf)
+				},
+			},
+		},
 	}
-
-	return <-ch, nil
 }
 
 type nonFatalError string

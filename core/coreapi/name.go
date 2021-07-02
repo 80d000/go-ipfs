@@ -6,22 +6,22 @@ import (
 	"strings"
 	"time"
 
-	coreiface "github.com/ipfs/go-ipfs/core/coreapi/interface"
-	caopts "github.com/ipfs/go-ipfs/core/coreapi/interface/options"
-	"github.com/ipfs/go-ipfs/keystore"
-	"github.com/ipfs/go-ipfs/namesys"
+	"github.com/ipfs/go-ipfs-keystore"
+	"github.com/ipfs/go-namesys"
 
-	"gx/ipfs/QmNiJiXwWE3kRhZrC5ej3kSjWHm337pYfhjLGSCDNKJP2s/go-libp2p-crypto"
-	ci "gx/ipfs/QmNiJiXwWE3kRhZrC5ej3kSjWHm337pYfhjLGSCDNKJP2s/go-libp2p-crypto"
-	"gx/ipfs/QmPJxxDsX2UbchSHobbYuvz7qnyJTFKvaKMzE2rZWJ4x5B/go-libp2p-peer"
-	ipath "gx/ipfs/QmQ3YSqfxunT5QBg6KBVskKyRE26q6hjSMyhpxchpm7jEN/go-path"
+	ipath "github.com/ipfs/go-path"
+	coreiface "github.com/ipfs/interface-go-ipfs-core"
+	caopts "github.com/ipfs/interface-go-ipfs-core/options"
+	path "github.com/ipfs/interface-go-ipfs-core/path"
+	ci "github.com/libp2p/go-libp2p-core/crypto"
+	peer "github.com/libp2p/go-libp2p-core/peer"
 )
 
 type NameAPI CoreAPI
 
 type ipnsEntry struct {
 	name  string
-	value coreiface.Path
+	value path.Path
 }
 
 // Name returns the ipnsEntry name.
@@ -30,12 +30,12 @@ func (e *ipnsEntry) Name() string {
 }
 
 // Value returns the ipnsEntry value.
-func (e *ipnsEntry) Value() coreiface.Path {
+func (e *ipnsEntry) Value() path.Path {
 	return e.value
 }
 
 // Publish announces new IPNS name and returns the new IPNS entry.
-func (api *NameAPI) Publish(ctx context.Context, p coreiface.Path, opts ...caopts.NamePublishOption) (coreiface.IpnsEntry, error) {
+func (api *NameAPI) Publish(ctx context.Context, p path.Path, opts ...caopts.NamePublishOption) (coreiface.IpnsEntry, error) {
 	if err := api.checkPublishAllowed(); err != nil {
 		return nil, err
 	}
@@ -76,7 +76,7 @@ func (api *NameAPI) Publish(ctx context.Context, p coreiface.Path, opts ...caopt
 	}
 
 	return &ipnsEntry{
-		name:  pid.Pretty(),
+		name:  coreiface.FormatKeyID(pid),
 		value: p,
 	}, nil
 }
@@ -93,9 +93,13 @@ func (api *NameAPI) Search(ctx context.Context, name string, opts ...caopts.Name
 	}
 
 	var resolver namesys.Resolver = api.namesys
-
 	if !options.Cache {
-		resolver = namesys.NewNameSystem(api.routing, api.repo.Datastore(), 0)
+		resolver, err = namesys.NewNameSystem(api.routing,
+			namesys.WithDatastore(api.repo.Datastore()),
+			namesys.WithDNSResolver(api.dnsResolver))
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	if !strings.HasPrefix(name, "/ipns/") {
@@ -106,10 +110,8 @@ func (api *NameAPI) Search(ctx context.Context, name string, opts ...caopts.Name
 	go func() {
 		defer close(out)
 		for res := range resolver.ResolveAsync(ctx, name, options.ResolveOpts...) {
-			p, _ := coreiface.ParsePath(res.Path.String())
-
 			select {
-			case out <- coreiface.IpnsResult{Path: p, Err: res.Err}:
+			case out <- coreiface.IpnsResult{Path: path.New(res.Path.String()), Err: res.Err}:
 			case <-ctx.Done():
 				return
 			}
@@ -121,14 +123,17 @@ func (api *NameAPI) Search(ctx context.Context, name string, opts ...caopts.Name
 
 // Resolve attempts to resolve the newest version of the specified name and
 // returns its path.
-func (api *NameAPI) Resolve(ctx context.Context, name string, opts ...caopts.NameResolveOption) (coreiface.Path, error) {
+func (api *NameAPI) Resolve(ctx context.Context, name string, opts ...caopts.NameResolveOption) (path.Path, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	results, err := api.Search(ctx, name, opts...)
 	if err != nil {
 		return nil, err
 	}
 
 	err = coreiface.ErrResolveFailed
-	var p coreiface.Path
+	var p path.Path
 
 	for res := range results {
 		p, err = res.Path, res.Err
@@ -140,11 +145,17 @@ func (api *NameAPI) Resolve(ctx context.Context, name string, opts ...caopts.Nam
 	return p, err
 }
 
-func keylookup(self ci.PrivKey, kstore keystore.Keystore, k string) (crypto.PrivKey, error) {
+func keylookup(self ci.PrivKey, kstore keystore.Keystore, k string) (ci.PrivKey, error) {
+	////////////////////
+	// Lookup by name //
+	////////////////////
+
+	// First, lookup self.
 	if k == "self" {
 		return self, nil
 	}
 
+	// Then, look in the keystore.
 	res, err := kstore.Get(k)
 	if res != nil {
 		return res, nil
@@ -159,20 +170,36 @@ func keylookup(self ci.PrivKey, kstore keystore.Keystore, k string) (crypto.Priv
 		return nil, err
 	}
 
+	//////////////////
+	// Lookup by ID //
+	//////////////////
+	targetPid, err := peer.Decode(k)
+	if err != nil {
+		return nil, keystore.ErrNoSuchKey
+	}
+
+	// First, check self.
+	pid, err := peer.IDFromPrivateKey(self)
+	if err != nil {
+		return nil, fmt.Errorf("failed to determine peer ID for private key: %w", err)
+	}
+	if pid == targetPid {
+		return self, nil
+	}
+
+	// Then, look in the keystore.
 	for _, key := range keys {
 		privKey, err := kstore.Get(key)
 		if err != nil {
 			return nil, err
 		}
 
-		pubKey := privKey.GetPublic()
-
-		pid, err := peer.IDFromPublicKey(pubKey)
+		pid, err := peer.IDFromPrivateKey(privKey)
 		if err != nil {
 			return nil, err
 		}
 
-		if pid.Pretty() == k {
+		if targetPid == pid {
 			return privKey, nil
 		}
 	}

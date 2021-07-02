@@ -1,7 +1,7 @@
 package plugin
 
 import (
-	coreiface "github.com/ipfs/go-ipfs/core/coreapi/interface"
+	coreiface "github.com/ipfs/interface-go-ipfs-core"
 )
 
 // PluginDaemon is an interface for daemon plugins. These plugins will be run on
@@ -10,5 +10,4 @@ type PluginDaemon interface {
 	Plugin
 
 	Start(coreiface.CoreAPI) error
-	Close() error
 }

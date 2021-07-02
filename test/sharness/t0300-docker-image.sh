@@ -23,17 +23,13 @@ test_expect_success "'docker --version' output looks good" '
   egrep "^Docker version" actual
 '
 
-test_expect_success "current user is in the 'docker' group" '
-  groups | egrep "\bdocker\b"
-'
-
 TEST_TRASH_DIR=$(pwd)
 TEST_SCRIPTS_DIR=$(dirname "$TEST_TRASH_DIR")
 TEST_TESTS_DIR=$(dirname "$TEST_SCRIPTS_DIR")
 APP_ROOT_DIR=$(dirname "$TEST_TESTS_DIR")
 
 test_expect_success "docker image build succeeds" '
-  docker_build "$TEST_TESTS_DIR/../Dockerfile.fast" "$APP_ROOT_DIR" >actual ||
+  docker_build "$TEST_TESTS_DIR/../Dockerfile" "$APP_ROOT_DIR" >actual ||
   test_fsh echo "TEST_TESTS_DIR: $TEST_TESTS_DIR" ||
   test_fsh echo "APP_ROOT_DIR : $APP_ROOT_DIR" ||
   test_fsh cat actual

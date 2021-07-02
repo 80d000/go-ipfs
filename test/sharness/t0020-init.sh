@@ -8,7 +8,7 @@ test_description="Test init command"
 
 . lib/test-lib.sh
 
-# test that ipfs fails to init if IPFS_PATH isnt writeable
+# test that ipfs fails to init if IPFS_PATH isn't writeable
 test_expect_success "create dir and change perms succeeds" '
   export IPFS_PATH="$(pwd)/.badipfs" &&
   mkdir "$IPFS_PATH" &&
@@ -22,9 +22,9 @@ test_expect_success "ipfs init fails" '
 # Under Windows/Cygwin the error message is different,
 # so we use the STD_ERR_MSG prereq.
 if test_have_prereq STD_ERR_MSG; then
-  init_err_msg="Error: error opening repository at $IPFS_PATH: permission denied"
+  init_err_msg="Error: error loading plugins: open $IPFS_PATH/config: permission denied"
 else
-  init_err_msg="Error: mkdir $IPFS_PATH: The system cannot find the path specified."
+  init_err_msg="Error: error loading plugins: open $IPFS_PATH/config: The system cannot find the path specified."
 fi
 
 test_expect_success "ipfs init output looks good" '
@@ -50,98 +50,159 @@ test_expect_success "ipfs cat no repo message looks good" '
   test_path_cmp cat_fail_exp cat_fail_out
 '
 
-# test that init succeeds
-test_expect_success "ipfs init succeeds" '
-  export IPFS_PATH="$(pwd)/.ipfs" &&
-  echo "IPFS_PATH: \"$IPFS_PATH\"" &&
-  BITS="2048" &&
-  ipfs init --bits="$BITS" >actual_init ||
-  test_fsh cat actual_init
-'
+# $1 must be one of 'rsa', 'ed25519' or '' (for default key algorithm).
+test_ipfs_init_flags() {
+        TEST_ALG=$1
 
-test_expect_success ".ipfs/ has been created" '
-  test -d ".ipfs" &&
-  test -f ".ipfs/config" &&
-  test -d ".ipfs/datastore" &&
-  test -d ".ipfs/blocks" &&
-  test ! -f ._check_writeable ||
-  test_fsh ls -al .ipfs
-'
+        # test that init succeeds
+        test_expect_success "ipfs init succeeds" '
+        export IPFS_PATH="$(pwd)/.ipfs" &&
+        echo "IPFS_PATH: \"$IPFS_PATH\"" &&
+        RSA_BITS="2048" &&
+        case $TEST_ALG in
+                "rsa")
+                        ipfs init --algorithm=rsa --bits="$RSA_BITS" >actual_init || test_fsh cat actual_init
+                        ;;
+                "ed25519")
+                        ipfs init --algorithm=ed25519 >actual_init || test_fsh cat actual_init
+                        ;;
+                *)
+                        ipfs init --algorithm=rsa --bits="$RSA_BITS" >actual_init || test_fsh cat actual_init
+                        ;;
+        esac
+        '
 
-test_expect_success "ipfs config succeeds" '
-  echo /ipfs >expected_config &&
-  ipfs config Mounts.IPFS >actual_config &&
-  test_cmp expected_config actual_config
-'
+        test_expect_success ".ipfs/ has been created" '
+        test -d ".ipfs" &&
+        test -f ".ipfs/config" &&
+        test -d ".ipfs/datastore" &&
+        test -d ".ipfs/blocks" &&
+        test ! -f ._check_writeable ||
+        test_fsh ls -al .ipfs
+        '
 
-test_expect_success "ipfs peer id looks good" '
-  PEERID=$(ipfs config Identity.PeerID) &&
-  test_check_peerid "$PEERID"
-'
+        test_expect_success "ipfs config succeeds" '
+        echo /ipfs >expected_config &&
+        ipfs config Mounts.IPFS >actual_config &&
+        test_cmp expected_config actual_config
+        '
 
-test_expect_success "ipfs init output looks good" '
-  STARTFILE="ipfs cat /ipfs/$HASH_WELCOME_DOCS/readme" &&
-  echo "initializing IPFS node at $IPFS_PATH" >expected &&
-  echo "generating $BITS-bit RSA keypair...done" >>expected &&
-  echo "peer identity: $PEERID" >>expected &&
-  echo "to get started, enter:" >>expected &&
-  printf "\\n\\t$STARTFILE\\n\\n" >>expected &&
-  test_cmp expected actual_init
-'
+        test_expect_success "ipfs peer id looks good" '
+        PEERID=$(ipfs config Identity.PeerID) &&
+        test_check_peerid "$PEERID"
+        '
 
-test_expect_success "Welcome readme exists" '
-  ipfs cat /ipfs/$HASH_WELCOME_DOCS/readme
-'
+        test_expect_success "ipfs init output looks good" '
+        STARTFILE="ipfs cat /ipfs/$HASH_WELCOME_DOCS/readme" &&
 
-test_expect_success "clean up ipfs dir" '
-  rm -rf "$IPFS_PATH"
-'
+        echo "generating $RSA_BITS-bit RSA keypair...done" >rsa_expected &&
+        echo "peer identity: $PEERID" >>rsa_expected &&
+        echo "initializing IPFS node at $IPFS_PATH" >>rsa_expected &&
+        echo "to get started, enter:" >>rsa_expected &&
+        printf "\\n\\t$STARTFILE\\n\\n" >>rsa_expected &&
 
-test_expect_success "'ipfs init --empty-repo' succeeds" '
-  BITS="1024" &&
-  ipfs init --bits="$BITS" --empty-repo >actual_init
-'
+        echo "generating ED25519 keypair...done" >ed25519_expected &&
+        echo "peer identity: $PEERID" >>ed25519_expected &&
+        echo "initializing IPFS node at $IPFS_PATH" >>ed25519_expected &&
+        echo "to get started, enter:" >>ed25519_expected &&
+        printf "\\n\\t$STARTFILE\\n\\n" >>ed25519_expected &&
 
-test_expect_success "ipfs peer id looks good" '
-  PEERID=$(ipfs config Identity.PeerID) &&
-  test_check_peerid "$PEERID"
-'
+        case $TEST_ALG in
+                rsa)
+                        test_cmp rsa_expected actual_init
+                        ;;
+                ed25519)
+                        test_cmp ed25519_expected actual_init
+                        ;;
+                *)
+                        test_cmp rsa_expected actual_init
+                        ;;
+        esac
+        '
 
-test_expect_success "'ipfs init --empty-repo' output looks good" '
-  echo "initializing IPFS node at $IPFS_PATH" >expected &&
-  echo "generating $BITS-bit RSA keypair...done" >>expected &&
-  echo "peer identity: $PEERID" >>expected &&
-  test_cmp expected actual_init
-'
+        test_expect_success "Welcome readme exists" '
+        ipfs cat /ipfs/$HASH_WELCOME_DOCS/readme
+        '
 
-test_expect_success "Welcome readme doesn't exists" '
-  test_must_fail ipfs cat /ipfs/$HASH_WELCOME_DOCS/readme
-'
+        test_expect_success "clean up ipfs dir" '
+        rm -rf "$IPFS_PATH"
+        '
 
-test_expect_success "ipfs id agent string contains correct version" '
-  ipfs id -f "<aver>" | grep $(ipfs version -n)
-'
+        test_expect_success "'ipfs init --empty-repo' succeeds" '
+        RSA_BITS="2048" &&
+        case $TEST_ALG in
+                rsa)
+                        ipfs init --algorithm=rsa --bits="$RSA_BITS" --empty-repo >actual_init
+                        ;;
+                ed25519)
+                        ipfs init --algorithm=ed25519 --empty-repo >actual_init
+                        ;;
+                *)
+                        ipfs init --empty-repo >actual_init
+                        ;;
+        esac
+        '
 
-test_expect_success "clean up ipfs dir" '
-  rm -rf "$IPFS_PATH"
-'
+        test_expect_success "ipfs peer id looks good" '
+        PEERID=$(ipfs config Identity.PeerID) &&
+        test_check_peerid "$PEERID"
+        '
+
+        test_expect_success "'ipfs init --empty-repo' output looks good" '
+
+        echo "generating $RSA_BITS-bit RSA keypair...done" >rsa_expected &&
+        echo "peer identity: $PEERID" >>rsa_expected &&
+        echo "initializing IPFS node at $IPFS_PATH" >>rsa_expected &&
+
+        echo "generating ED25519 keypair...done" >ed25519_expected &&
+        echo "peer identity: $PEERID" >>ed25519_expected &&
+        echo "initializing IPFS node at $IPFS_PATH" >>ed25519_expected &&
+
+        case $TEST_ALG in
+                rsa)
+                        test_cmp rsa_expected actual_init
+                        ;;
+                ed25519)
+                        test_cmp ed25519_expected actual_init
+                        ;;
+                *)
+                        test_cmp ed25519_expected actual_init
+                        ;;
+        esac
+        '
+
+        test_expect_success "Welcome readme doesn't exist" '
+        test_must_fail ipfs cat /ipfs/$HASH_WELCOME_DOCS/readme
+        '
+
+        test_expect_success "ipfs id agent string contains correct version" '
+        ipfs id -f "<aver>" | grep $(ipfs version -n)
+        '
+
+        test_expect_success "clean up ipfs dir" '
+        rm -rf "$IPFS_PATH"
+        '
+}
+test_ipfs_init_flags 'ed25519'
+test_ipfs_init_flags 'rsa'
+test_ipfs_init_flags ''
 
 # test init profiles
 test_expect_success "'ipfs init --profile' with invalid profile fails" '
-  BITS="1024" &&
-  test_must_fail ipfs init --bits="$BITS" --profile=nonexistent_profile 2> invalid_profile_out
+  RSA_BITS="2048" &&
+  test_must_fail ipfs init --profile=nonexistent_profile 2> invalid_profile_out
   EXPECT="Error: invalid configuration profile: nonexistent_profile" &&
   grep "$EXPECT" invalid_profile_out
 '
 
 test_expect_success "'ipfs init --profile' succeeds" '
-  BITS="1024" &&
-  ipfs init --bits="$BITS" --profile=server
+  RSA_BITS="2048" &&
+  ipfs init --profile=server
 '
 
 test_expect_success "'ipfs config Swarm.AddrFilters' looks good" '
   ipfs config Swarm.AddrFilters > actual_config &&
-  test $(cat actual_config | wc -l) = 17
+  test $(cat actual_config | wc -l) = 18
 '
 
 test_expect_success "clean up ipfs dir" '
@@ -149,8 +210,8 @@ test_expect_success "clean up ipfs dir" '
 '
 
 test_expect_success "'ipfs init --profile=test' succeeds" '
-  BITS="1024" &&
-  ipfs init --bits="$BITS" --profile=test
+  RSA_BITS="2048" &&
+  ipfs init --profile=test
 '
 
 test_expect_success "'ipfs config Bootstrap' looks good" '
@@ -163,13 +224,27 @@ test_expect_success "'ipfs config Addresses.API' looks good" '
   test $(cat actual_config) = "/ip4/127.0.0.1/tcp/0"
 '
 
+test_expect_success "ipfs init from existing config succeeds" '
+  export ORIG_PATH=$IPFS_PATH
+  export IPFS_PATH=$(pwd)/.ipfs-clone
+
+  ipfs init "$ORIG_PATH/config" &&
+  ipfs config Addresses.API > actual_config &&
+  test $(cat actual_config) = "/ip4/127.0.0.1/tcp/0"
+'
+
+test_expect_success "clean up ipfs clone dir and reset IPFS_PATH" '
+  rm -rf "$IPFS_PATH" &&
+  export IPFS_PATH=$ORIG_PATH
+'
+
 test_expect_success "clean up ipfs dir" '
   rm -rf "$IPFS_PATH"
 '
 
 test_expect_success "'ipfs init --profile=lowpower' succeeds" '
-  BITS="1024" &&
-  ipfs init --bits="$BITS" --profile=lowpower
+  RSA_BITS="2048" &&
+  ipfs init --profile=lowpower
 '
 
 test_expect_success "'ipfs config Discovery.Routing' looks good" '

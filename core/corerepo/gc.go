@@ -7,13 +7,13 @@ import (
 	"time"
 
 	"github.com/ipfs/go-ipfs/core"
-	gc "github.com/ipfs/go-ipfs/pin/gc"
-	repo "github.com/ipfs/go-ipfs/repo"
+	"github.com/ipfs/go-ipfs/gc"
+	"github.com/ipfs/go-ipfs/repo"
 
-	humanize "gx/ipfs/QmPSBJL4momYnE7DcUyk2DVhD6rH488ZmHBGLbxNdhU44K/go-humanize"
-	cid "gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
-	mfs "gx/ipfs/QmVBXaQqupXCFtS62xtr9EsKGkbK9LviqCKSzwcqzwvX9U/go-mfs"
-	logging "gx/ipfs/QmcuXC5cxs79ro2cUuHs4HQ2bkDLJUYokwL8aivcX6HW3C/go-log"
+	"github.com/dustin/go-humanize"
+	"github.com/ipfs/go-cid"
+	logging "github.com/ipfs/go-log"
+	"github.com/ipfs/go-mfs"
 )
 
 var log = logging.Logger("corerepo")
@@ -40,11 +40,15 @@ func NewGC(n *core.IpfsNode) (*GC, error) {
 	// TODO: there should be a general check for all of the cfg fields
 	// maybe distinguish between user config file and default struct?
 	if cfg.Datastore.StorageMax == "" {
-		r.SetConfigKey("Datastore.StorageMax", "10GB")
+		if err := r.SetConfigKey("Datastore.StorageMax", "10GB"); err != nil {
+			return nil, err
+		}
 		cfg.Datastore.StorageMax = "10GB"
 	}
 	if cfg.Datastore.StorageGCWatermark == 0 {
-		r.SetConfigKey("Datastore.StorageGCWatermark", 90)
+		if err := r.SetConfigKey("Datastore.StorageGCWatermark", 90); err != nil {
+			return nil, err
+		}
 		cfg.Datastore.StorageGCWatermark = 90
 	}
 
@@ -80,8 +84,6 @@ func BestEffortRoots(filesRoot *mfs.Root) ([]cid.Cid, error) {
 }
 
 func GarbageCollect(n *core.IpfsNode, ctx context.Context) error {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel() // in case error occurs during operation
 	roots, err := BestEffortRoots(n.FilesRoot)
 	if err != nil {
 		return err
@@ -210,12 +212,11 @@ func (gc *GC) maybeGC(ctx context.Context, offset uint64) error {
 
 	if storage+offset > gc.StorageGC {
 		if storage+offset > gc.StorageMax {
-			log.Warningf("pre-GC: %s", ErrMaxStorageExceeded)
+			log.Warnf("pre-GC: %s", ErrMaxStorageExceeded)
 		}
 
 		// Do GC here
 		log.Info("Watermark exceeded. Starting repo GC...")
-		defer log.EventBegin(ctx, "repoGC").Done()
 
 		if err := GarbageCollect(gc.Node, ctx); err != nil {
 			return err

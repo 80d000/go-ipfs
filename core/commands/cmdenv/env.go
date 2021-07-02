@@ -2,16 +2,17 @@ package cmdenv
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/ipfs/go-ipfs/commands"
 	"github.com/ipfs/go-ipfs/core"
-	coreiface "github.com/ipfs/go-ipfs/core/coreapi/interface"
-	options "github.com/ipfs/go-ipfs/core/coreapi/interface/options"
 
-	cmds "gx/ipfs/QmR77mMvvh8mJBBWQmBfQBu8oD38NUN4KE9SL2gDgAQNc6/go-ipfs-cmds"
-	config "gx/ipfs/QmTbcMKv6GU3fxhnNcbzYChdox9Fdd7VpucM3PQ7UWjX3D/go-ipfs-config"
-	logging "gx/ipfs/QmcuXC5cxs79ro2cUuHs4HQ2bkDLJUYokwL8aivcX6HW3C/go-log"
+	cmds "github.com/ipfs/go-ipfs-cmds"
+	config "github.com/ipfs/go-ipfs-config"
+	logging "github.com/ipfs/go-log"
+	coreiface "github.com/ipfs/interface-go-ipfs-core"
+	options "github.com/ipfs/interface-go-ipfs-core/options"
 )
 
 var log = logging.Logger("core/commands/cmdenv")
@@ -69,4 +70,30 @@ func GetConfigRoot(env cmds.Environment) (string, error) {
 	}
 
 	return ctx.ConfigRoot, nil
+}
+
+// EscNonPrint converts non-printable characters and backslash into Go escape
+// sequences.  This is done to display all characters in a string, including
+// those that would otherwise not be displayed or have an undesirable effect on
+// the display.
+func EscNonPrint(s string) string {
+	if !needEscape(s) {
+		return s
+	}
+
+	esc := strconv.Quote(s)
+	// Remove first and last quote, and unescape quotes.
+	return strings.ReplaceAll(esc[1:len(esc)-1], `\"`, `"`)
+}
+
+func needEscape(s string) bool {
+	if strings.ContainsRune(s, '\\') {
+		return true
+	}
+	for _, r := range s {
+		if !strconv.IsPrint(r) {
+			return true
+		}
+	}
+	return false
 }

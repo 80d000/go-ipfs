@@ -31,9 +31,21 @@ test_expect_success "GET IPFS path succeeds" '
   curl -sfo actual "http://127.0.0.1:$port/ipfs/$HASH"
 '
 
-test_expect_success "GET IPFS path with explicit filename succeeds with proper header" "
-  curl -fo actual -D actual_headers 'http://127.0.0.1:$port/ipfs/$HASH?filename=testтест' &&
-  grep -F \"Content-Disposition: inline; filename*=UTF-8''test%D1%82%D0%B5%D1%81%D1%82\" actual_headers
+test_expect_success "GET IPFS path with explicit ?filename succeeds with proper header" "
+  curl -fo actual -D actual_headers 'http://127.0.0.1:$port/ipfs/$HASH?filename=testтест.pdf' &&
+  grep -F 'Content-Disposition: inline; filename=\"test____.pdf\"; filename*=UTF-8'\'\''test%D1%82%D0%B5%D1%81%D1%82.pdf' actual_headers
+"
+
+test_expect_success "GET IPFS path with explicit ?filename and &download=true succeeds with proper header" "
+  curl -fo actual -D actual_headers 'http://127.0.0.1:$port/ipfs/$HASH?filename=testтест.mp4&download=true' &&
+  grep -F 'Content-Disposition: attachment; filename=\"test____.mp4\"; filename*=UTF-8'\'\''test%D1%82%D0%B5%D1%81%D1%82.mp4' actual_headers
+"
+
+# https://github.com/ipfs/go-ipfs/issues/4025#issuecomment-342250616
+test_expect_success "GET for Service Worker registration outside of an IPFS content root errors" "
+  curl -H 'Service-Worker: script'  -svX GET 'http://127.0.0.1:$port/ipfs/$HASH?filename=sw.js' > curl_sw_out 2>&1 &&
+  grep 'HTTP/1.1 400 Bad Request' curl_sw_out &&
+  grep 'navigator.serviceWorker: registration is not allowed for this scope' curl_sw_out
 "
 
 test_expect_success "GET IPFS path output looks good" '
@@ -42,8 +54,9 @@ test_expect_success "GET IPFS path output looks good" '
 '
 
 test_expect_success "GET IPFS directory path succeeds" '
-  mkdir dir &&
+  mkdir -p dir/dirwithindex &&
   echo "12345" >dir/test &&
+  echo "hello i am a webpage" >dir/dirwithindex/index.html &&
   ipfs add -r -q dir >actual &&
   HASH2=$(tail -n 1 actual) &&
   curl -sf "http://127.0.0.1:$port/ipfs/$HASH2"
@@ -57,8 +70,31 @@ test_expect_success "GET IPFS directory file output looks good" '
   test_cmp dir/test actual
 '
 
-test_expect_success "GET IPFS non existent file returns code expected (404)" '
+test_expect_success "GET IPFS directory with index.html returns redirect to add trailing slash" "
+  curl -sI -o response_without_slash \"http://127.0.0.1:$port/ipfs/$HASH2/dirwithindex?query=to-remember\"  &&
+  test_should_contain \"Location: /ipfs/$HASH2/dirwithindex/?query=to-remember\" response_without_slash
+"
+
+test_expect_success "GET IPFS directory with index.html and trailing slash returns expected output" "
+  curl -s -o response_with_slash \"http://127.0.0.1:$port/ipfs/$HASH2/dirwithindex/?query=to-remember\"  &&
+  test_should_contain \"hello i am a webpage\" response_with_slash
+"
+
+test_expect_success "GET IPFS nonexistent file returns code expected (404)" '
   test_curl_resp_http_code "http://127.0.0.1:$port/ipfs/$HASH2/pleaseDontAddMe" "HTTP/1.1 404 Not Found"
+'
+
+# https://github.com/ipfs/go-ipfs/issues/8230
+test_expect_success "GET IPFS inlined zero-length data object returns ok code (200)" '
+  curl -sD - "http://127.0.0.1:$port/ipfs/bafkqaaa" > empty_ok_response &&
+  test_should_contain "HTTP/1.1 200 OK" empty_ok_response &&
+  test_should_contain "Content-Length: 0" empty_ok_response
+'
+
+test_expect_success "GET /ipfs/ipfs/{cid} returns redirect to the valid path" '
+  curl -sD - "http://127.0.0.1:$port/ipfs/ipfs/bafkqaaa?query=to-remember" > response_with_double_ipfs_ns &&
+  test_should_contain "<meta http-equiv=\"refresh\" content=\"10;url=/ipfs/bafkqaaa?query=to-remember\" />" response_with_double_ipfs_ns &&
+  test_should_contain "<link rel=\"canonical\" href=\"/ipfs/bafkqaaa?query=to-remember\" />" response_with_double_ipfs_ns
 '
 
 test_expect_failure "GET IPNS path succeeds" '
@@ -70,6 +106,13 @@ test_expect_failure "GET IPNS path succeeds" '
 
 test_expect_failure "GET IPNS path output looks good" '
   test_cmp expected actual
+'
+
+test_expect_success "GET /ipfs/ipns/{peerid} returns redirect to the valid path" '
+  PEERID=$(ipfs config Identity.PeerID) &&
+  curl -sD - "http://127.0.0.1:$port/ipfs/ipns/${PEERID}?query=to-remember" > response_with_ipfs_ipns_ns &&
+  test_should_contain "<meta http-equiv=\"refresh\" content=\"10;url=/ipns/${PEERID}?query=to-remember\" />" response_with_ipfs_ipns_ns &&
+  test_should_contain "<link rel=\"canonical\" href=\"/ipns/${PEERID}?query=to-remember\" />" response_with_ipfs_ipns_ns
 '
 
 test_expect_success "GET invalid IPFS path errors" '
@@ -97,7 +140,7 @@ test_expect_success "log output looks good" '
 '
 
 test_expect_success "GET /api/v0/version succeeds" '
-  curl -v "http://127.0.0.1:$apiport/api/v0/version" 2> version_out
+  curl -X POST -v "http://127.0.0.1:$apiport/api/v0/version" 2> version_out
 '
 
 test_expect_success "output only has one transfer encoding header" '
@@ -163,6 +206,8 @@ for cmd in add  \
            block/put \
            bootstrap \
            config \
+           dag/put \
+           dag/import \
            dht \
            diag \
            id \
@@ -187,7 +232,7 @@ done
 
 # This one is different. `local` will be interpreted as a path if the command isn't defined.
 test_expect_success "test gateway api is sanitized: refs/local" '
-    echo "Error: invalid '"'ipfs ref'"' path" > refs_local_expected &&
+    echo "Error: invalid path \"local\": selected encoding not supported" > refs_local_expected &&
     ! ipfs --api /ip4/127.0.0.1/tcp/$port refs local > refs_local_actual 2>&1 &&
     test_cmp refs_local_expected refs_local_actual
   '
@@ -243,7 +288,7 @@ test_expect_success "try fetching not present ipns key from node 0" '
   test_expect_code 22 curl -f "http://127.0.0.1:$GWPORT/ipns/$PEERID_1"
 '
 
-test_expect_success "try fetching present key from from node 0" '
+test_expect_success "try fetching present key from node 0" '
   BAR=$(echo "bar" | ipfsi 0 add -Q) &&
   curl -f "http://127.0.0.1:$GWPORT/ipfs/$BAR"
 '

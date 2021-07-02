@@ -7,12 +7,11 @@ import (
 	"text/tabwriter"
 
 	cmdenv "github.com/ipfs/go-ipfs/core/commands/cmdenv"
-	iface "github.com/ipfs/go-ipfs/core/coreapi/interface"
 
-	cmds "gx/ipfs/QmR77mMvvh8mJBBWQmBfQBu8oD38NUN4KE9SL2gDgAQNc6/go-ipfs-cmds"
-	merkledag "gx/ipfs/QmUtsx89yiCY6F8mbpP6ecXckiSzCBH7EvkKZuZEHBcr1m/go-merkledag"
-	unixfs "gx/ipfs/QmZArMcsVDsXdcLbUx4844CuqKXBpbxdeiryM4cnmGTNRq/go-unixfs"
-	cmdkit "gx/ipfs/Qmde5VP1qUkyQXKCfmEUA7bP64V2HAptbJ7phuPp7jXWwg/go-ipfs-cmdkit"
+	cmds "github.com/ipfs/go-ipfs-cmds"
+	merkledag "github.com/ipfs/go-merkledag"
+	unixfs "github.com/ipfs/go-unixfs"
+	path "github.com/ipfs/interface-go-ipfs-core/path"
 )
 
 type LsLink struct {
@@ -34,8 +33,8 @@ type LsOutput struct {
 }
 
 var LsCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
-		Tagline: "List directory contents for Unix filesystem objects.",
+	Helptext: cmds.HelpText{
+		Tagline: "List directory contents for Unix filesystem objects. Deprecated: Use 'ipfs ls' instead.",
 		ShortDescription: `
 Displays the contents of an IPFS or IPNS object(s) at the given path.
 
@@ -43,8 +42,8 @@ The JSON output contains size information. For files, the child size
 is the total size of the file contents. For directories, the child
 size is the IPFS link size.
 
-This functionality is deprecated, and will be removed in future versions. If
-possible, please use 'ipfs ls' instead.
+This functionality is deprecated, and will be removed in future versions as it duplicates the functionality of 'ipfs ls'.
+If possible, please use 'ipfs ls' instead.
 `,
 		LongDescription: `
 Displays the contents of an IPFS or IPNS object(s) at the given path.
@@ -63,13 +62,13 @@ Example:
     > ipfs file ls /ipfs/QmW2WQi7j6c7UgJTarActp7tDNikE4B2qXtFCfLPdsgaTQ
     cat.jpg
 
-This functionality is deprecated, and will be removed in future versions. If
-possible, please use 'ipfs ls' instead.
+This functionality is deprecated, and will be removed in future versions as it duplicates the functionality of 'ipfs ls'.
+If possible, please use 'ipfs ls' instead.
 `,
 	},
 
-	Arguments: []cmdkit.Argument{
-		cmdkit.StringArg("ipfs-path", true, true, "The path to the IPFS object(s) to list links from.").EnableStdin(),
+	Arguments: []cmds.Argument{
+		cmds.StringArg("ipfs-path", true, true, "The path to the IPFS object(s) to list links from.").EnableStdin(),
 	},
 	Run: func(req *cmds.Request, res cmds.ResponseEmitter, env cmds.Environment) error {
 		nd, err := cmdenv.GetNode(env)
@@ -96,12 +95,7 @@ possible, please use 'ipfs ls' instead.
 		for _, p := range paths {
 			ctx := req.Context
 
-			fpath, err := iface.ParsePath(p)
-			if err != nil {
-				return err
-			}
-
-			merkleNode, err := api.ResolveNode(ctx, fpath)
+			merkleNode, err := api.ResolveNode(ctx, path.New(p))
 			if err != nil {
 				return err
 			}
@@ -219,12 +213,12 @@ possible, please use 'ipfs ls' instead.
 				if len(out.Arguments) > 1 {
 					for _, arg := range directories[i:] {
 						if out.Arguments[arg] == hash {
-							fmt.Fprintf(tw, "%s:\n", arg)
+							fmt.Fprintf(tw, "%s:\n", cmdenv.EscNonPrint(arg))
 						}
 					}
 				}
 				for _, link := range object.Links {
-					fmt.Fprintf(tw, "%s\n", link.Name)
+					fmt.Fprintf(tw, "%s\n", cmdenv.EscNonPrint(link.Name))
 				}
 			}
 			tw.Flush()

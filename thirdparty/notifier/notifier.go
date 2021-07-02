@@ -1,13 +1,13 @@
 // Package notifier provides a simple notification dispatcher
-// meant to be embedded in larger structres who wish to allow
+// meant to be embedded in larger structures who wish to allow
 // clients to sign up for event notifications.
 package notifier
 
 import (
 	"sync"
 
-	process "gx/ipfs/QmSF8fPo3jgVBAy8fpdjjYqgG87dkJgUprRBHRd2tmfgpP/goprocess"
-	ratelimit "gx/ipfs/QmSF8fPo3jgVBAy8fpdjjYqgG87dkJgUprRBHRd2tmfgpP/goprocess/ratelimit"
+	process "github.com/jbenet/goprocess"
+	ratelimit "github.com/jbenet/goprocess/ratelimit"
 )
 
 // Notifiee is a generic interface. Clients implement

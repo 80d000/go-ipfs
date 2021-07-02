@@ -7,17 +7,16 @@ import (
 	cmdenv "github.com/ipfs/go-ipfs/core/commands/cmdenv"
 	e "github.com/ipfs/go-ipfs/core/commands/e"
 
-	peer "gx/ipfs/QmPJxxDsX2UbchSHobbYuvz7qnyJTFKvaKMzE2rZWJ4x5B/go-libp2p-peer"
-	humanize "gx/ipfs/QmPSBJL4momYnE7DcUyk2DVhD6rH488ZmHBGLbxNdhU44K/go-humanize"
-	cmds "gx/ipfs/QmR77mMvvh8mJBBWQmBfQBu8oD38NUN4KE9SL2gDgAQNc6/go-ipfs-cmds"
-	bitswap "gx/ipfs/QmYJ48z7NEzo3u2yCvUvNtBQ7wJWd5dX2nxxc7FeA6nHq1/go-bitswap"
-	decision "gx/ipfs/QmYJ48z7NEzo3u2yCvUvNtBQ7wJWd5dX2nxxc7FeA6nHq1/go-bitswap/decision"
-	cidutil "gx/ipfs/QmdPQx9fvN5ExVwMhRmh7YpCQJzJrFhd1AjVBwJmRMFJeX/go-cidutil"
-	cmdkit "gx/ipfs/Qmde5VP1qUkyQXKCfmEUA7bP64V2HAptbJ7phuPp7jXWwg/go-ipfs-cmdkit"
+	humanize "github.com/dustin/go-humanize"
+	bitswap "github.com/ipfs/go-bitswap"
+	decision "github.com/ipfs/go-bitswap/decision"
+	cidutil "github.com/ipfs/go-cidutil"
+	cmds "github.com/ipfs/go-ipfs-cmds"
+	peer "github.com/libp2p/go-libp2p-core/peer"
 )
 
 var BitswapCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
+	Helptext: cmds.HelpText{
 		Tagline:          "Interact with the bitswap agent.",
 		ShortDescription: ``,
 	},
@@ -35,13 +34,13 @@ const (
 )
 
 var showWantlistCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
+	Helptext: cmds.HelpText{
 		Tagline: "Show blocks currently on the wantlist.",
 		ShortDescription: `
 Print out all blocks currently on the bitswap wantlist for the local peer.`,
 	},
-	Options: []cmdkit.Option{
-		cmdkit.StringOption(peerOptionName, "p", "Specify which peer to show wantlist for. Default: self."),
+	Options: []cmds.Option{
+		cmds.StringOption(peerOptionName, "p", "Specify which peer to show wantlist for. Default: self."),
 	},
 	Type: KeyList{},
 	Run: func(req *cmds.Request, res cmds.ResponseEmitter, env cmds.Environment) error {
@@ -50,7 +49,7 @@ Print out all blocks currently on the bitswap wantlist for the local peer.`,
 			return err
 		}
 
-		if !nd.OnlineMode() {
+		if !nd.IsOnline {
 			return ErrNotOnline
 		}
 
@@ -61,7 +60,7 @@ Print out all blocks currently on the bitswap wantlist for the local peer.`,
 
 		pstr, found := req.Options[peerOptionName].(string)
 		if found {
-			pid, err := peer.IDB58Decode(pstr)
+			pid, err := peer.Decode(pstr)
 			if err != nil {
 				return err
 			}
@@ -88,10 +87,19 @@ Print out all blocks currently on the bitswap wantlist for the local peer.`,
 	},
 }
 
+const (
+	bitswapVerboseOptionName = "verbose"
+	bitswapHumanOptionName   = "human"
+)
+
 var bitswapStatCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
+	Helptext: cmds.HelpText{
 		Tagline:          "Show some diagnostic information on the bitswap agent.",
 		ShortDescription: ``,
+	},
+	Options: []cmds.Option{
+		cmds.BoolOption(bitswapVerboseOptionName, "v", "Print extra information"),
+		cmds.BoolOption(bitswapHumanOptionName, "Print sizes in human readable format (e.g., 1K 234M 2G)"),
 	},
 	Type: bitswap.Stat{},
 	Run: func(req *cmds.Request, res cmds.ResponseEmitter, env cmds.Environment) error {
@@ -100,8 +108,8 @@ var bitswapStatCmd = &cmds.Command{
 			return err
 		}
 
-		if !nd.OnlineMode() {
-			return cmdkit.Errorf(cmdkit.ErrClient, ErrNotOnline.Error())
+		if !nd.IsOnline {
+			return cmds.Errorf(cmds.ErrClient, ErrNotOnline.Error())
 		}
 
 		bs, ok := nd.Exchange.(*bitswap.Bitswap)
@@ -122,21 +130,36 @@ var bitswapStatCmd = &cmds.Command{
 			if err != nil {
 				return err
 			}
+			verbose, _ := req.Options[bitswapVerboseOptionName].(bool)
+			human, _ := req.Options[bitswapHumanOptionName].(bool)
+
 			fmt.Fprintln(w, "bitswap status")
 			fmt.Fprintf(w, "\tprovides buffer: %d / %d\n", s.ProvideBufLen, bitswap.HasBlockBufferSize)
 			fmt.Fprintf(w, "\tblocks received: %d\n", s.BlocksReceived)
 			fmt.Fprintf(w, "\tblocks sent: %d\n", s.BlocksSent)
-			fmt.Fprintf(w, "\tdata received: %d\n", s.DataReceived)
-			fmt.Fprintf(w, "\tdata sent: %d\n", s.DataSent)
+			if human {
+				fmt.Fprintf(w, "\tdata received: %s\n", humanize.Bytes(s.DataReceived))
+				fmt.Fprintf(w, "\tdata sent: %s\n", humanize.Bytes(s.DataSent))
+			} else {
+				fmt.Fprintf(w, "\tdata received: %d\n", s.DataReceived)
+				fmt.Fprintf(w, "\tdata sent: %d\n", s.DataSent)
+			}
 			fmt.Fprintf(w, "\tdup blocks received: %d\n", s.DupBlksReceived)
-			fmt.Fprintf(w, "\tdup data received: %s\n", humanize.Bytes(s.DupDataReceived))
+			if human {
+				fmt.Fprintf(w, "\tdup data received: %s\n", humanize.Bytes(s.DupDataReceived))
+			} else {
+				fmt.Fprintf(w, "\tdup data received: %d\n", s.DupDataReceived)
+			}
 			fmt.Fprintf(w, "\twantlist [%d keys]\n", len(s.Wantlist))
 			for _, k := range s.Wantlist {
 				fmt.Fprintf(w, "\t\t%s\n", enc.Encode(k))
 			}
+
 			fmt.Fprintf(w, "\tpartners [%d]\n", len(s.Peers))
-			for _, p := range s.Peers {
-				fmt.Fprintf(w, "\t\t%s\n", p)
+			if verbose {
+				for _, p := range s.Peers {
+					fmt.Fprintf(w, "\t\t%s\n", p)
+				}
 			}
 
 			return nil
@@ -145,7 +168,7 @@ var bitswapStatCmd = &cmds.Command{
 }
 
 var ledgerCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
+	Helptext: cmds.HelpText{
 		Tagline: "Show the current ledger for a peer.",
 		ShortDescription: `
 The Bitswap decision engine tracks the number of bytes exchanged between IPFS
@@ -153,8 +176,8 @@ nodes, and stores this information as a collection of ledgers. This command
 prints the ledger associated with a given peer.
 `,
 	},
-	Arguments: []cmdkit.Argument{
-		cmdkit.StringArg("peer", true, false, "The PeerID (B58) of the ledger to inspect."),
+	Arguments: []cmds.Argument{
+		cmds.StringArg("peer", true, false, "The PeerID (B58) of the ledger to inspect."),
 	},
 	Type: decision.Receipt{},
 	Run: func(req *cmds.Request, res cmds.ResponseEmitter, env cmds.Environment) error {
@@ -163,7 +186,7 @@ prints the ledger associated with a given peer.
 			return err
 		}
 
-		if !nd.OnlineMode() {
+		if !nd.IsOnline {
 			return ErrNotOnline
 		}
 
@@ -172,7 +195,7 @@ prints the ledger associated with a given peer.
 			return e.TypeErr(bs, nd.Exchange)
 		}
 
-		partner, err := peer.IDB58Decode(req.Arguments[0])
+		partner, err := peer.Decode(req.Arguments[0])
 		if err != nil {
 			return err
 		}
@@ -194,7 +217,7 @@ prints the ledger associated with a given peer.
 }
 
 var reprovideCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
+	Helptext: cmds.HelpText{
 		Tagline: "Trigger reprovider.",
 		ShortDescription: `
 Trigger reprovider to announce our data to network.
@@ -206,11 +229,11 @@ Trigger reprovider to announce our data to network.
 			return err
 		}
 
-		if !nd.OnlineMode() {
+		if !nd.IsOnline {
 			return ErrNotOnline
 		}
 
-		err = nd.Reprovider.Trigger(req.Context)
+		err = nd.Provider.Reprovide(req.Context)
 		if err != nil {
 			return err
 		}

@@ -8,18 +8,16 @@ import (
 	"os/exec"
 	"strings"
 
-	commands "github.com/ipfs/go-ipfs/commands"
-
-	cmds "gx/ipfs/QmR77mMvvh8mJBBWQmBfQBu8oD38NUN4KE9SL2gDgAQNc6/go-ipfs-cmds"
-	cmdkit "gx/ipfs/Qmde5VP1qUkyQXKCfmEUA7bP64V2HAptbJ7phuPp7jXWwg/go-ipfs-cmdkit"
+	cmds "github.com/ipfs/go-ipfs-cmds"
 )
 
-func ExternalBinary() *cmds.Command {
+func ExternalBinary(instructions string) *cmds.Command {
 	return &cmds.Command{
-		Arguments: []cmdkit.Argument{
-			cmdkit.StringArg("args", false, true, "Arguments for subcommand."),
+		Arguments: []cmds.Argument{
+			cmds.StringArg("args", false, true, "Arguments for subcommand."),
 		},
 		External: true,
+		NoRemote: true,
 		Run: func(req *cmds.Request, res cmds.ResponseEmitter, env cmds.Environment) error {
 			binname := strings.Join(append([]string{"ipfs"}, req.Path...), "-")
 			_, err := exec.LookPath(binname)
@@ -30,7 +28,7 @@ func ExternalBinary() *cmds.Command {
 						buf := new(bytes.Buffer)
 						fmt.Fprintf(buf, "%s is an 'external' command.\n", binname)
 						fmt.Fprintf(buf, "It does not currently appear to be installed.\n")
-						fmt.Fprintf(buf, "Please refer to the ipfs documentation for instructions.\n")
+						fmt.Fprintf(buf, "%s\n", instructions)
 						return res.Emit(buf)
 					}
 				}
@@ -50,15 +48,6 @@ func ExternalBinary() *cmds.Command {
 
 			// setup env of child program
 			osenv := os.Environ()
-
-			// Get the node iff already defined.
-			if cctx, ok := env.(*commands.Context); ok && cctx.Online {
-				nd, err := cctx.GetNode()
-				if err != nil {
-					return fmt.Errorf("failed to start ipfs node: %s", err)
-				}
-				osenv = append(osenv, fmt.Sprintf("IPFS_ONLINE=%t", nd.OnlineMode()))
-			}
 
 			cmd.Env = osenv
 

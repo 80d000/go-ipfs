@@ -14,10 +14,10 @@ import (
 	"github.com/ipfs/go-ipfs/core"
 	corecommands "github.com/ipfs/go-ipfs/core/commands"
 
-	path "gx/ipfs/QmQ3YSqfxunT5QBg6KBVskKyRE26q6hjSMyhpxchpm7jEN/go-path"
-	cmds "gx/ipfs/QmR77mMvvh8mJBBWQmBfQBu8oD38NUN4KE9SL2gDgAQNc6/go-ipfs-cmds"
-	cmdsHttp "gx/ipfs/QmR77mMvvh8mJBBWQmBfQBu8oD38NUN4KE9SL2gDgAQNc6/go-ipfs-cmds/http"
-	config "gx/ipfs/QmTbcMKv6GU3fxhnNcbzYChdox9Fdd7VpucM3PQ7UWjX3D/go-ipfs-config"
+	cmds "github.com/ipfs/go-ipfs-cmds"
+	cmdsHttp "github.com/ipfs/go-ipfs-cmds/http"
+	config "github.com/ipfs/go-ipfs-config"
+	path "github.com/ipfs/go-path"
 )
 
 var (
@@ -40,6 +40,8 @@ const APIPath = "/api/v0"
 var defaultLocalhostOrigins = []string{
 	"http://127.0.0.1:<port>",
 	"https://127.0.0.1:<port>",
+	"http://[::1]:<port>",
+	"https://[::1]:<port>",
 	"http://localhost:<port>",
 	"https://localhost:<port>",
 }
@@ -47,7 +49,7 @@ var defaultLocalhostOrigins = []string{
 func addCORSFromEnv(c *cmdsHttp.ServerConfig) {
 	origin := os.Getenv(originEnvKey)
 	if origin != "" {
-		log.Warning(originEnvKeyDeprecate)
+		log.Warn(originEnvKeyDeprecate)
 		c.AppendAllowedOrigins(origin)
 	}
 }
@@ -61,10 +63,8 @@ func addHeadersFromConfig(c *cmdsHttp.ServerConfig, nc *config.Config) {
 	if acam := nc.API.HTTPHeaders[cmdsHttp.ACAMethods]; acam != nil {
 		c.SetAllowedMethods(acam...)
 	}
-	if acac := nc.API.HTTPHeaders[cmdsHttp.ACACredentials]; acac != nil {
-		for _, v := range acac {
-			c.SetAllowCredentials(strings.ToLower(v) == "true")
-		}
+	for _, v := range nc.API.HTTPHeaders[cmdsHttp.ACACredentials] {
+		c.SetAllowCredentials(strings.ToLower(v) == "true")
 	}
 
 	c.Headers = make(map[string][]string, len(nc.API.HTTPHeaders)+1)
@@ -91,7 +91,7 @@ func addCORSDefaults(c *cmdsHttp.ServerConfig) {
 
 	// by default, use GET, PUT, POST
 	if len(c.AllowedMethods()) == 0 {
-		c.SetAllowedMethods("GET", "POST", "PUT")
+		c.SetAllowedMethods(http.MethodGet, http.MethodPost, http.MethodPut)
 	}
 }
 
@@ -119,11 +119,17 @@ func patchCORSVars(c *cmdsHttp.ServerConfig, addr net.Addr) {
 	c.SetAllowedOrigins(newOrigins...)
 }
 
-func commandsOption(cctx oldcmds.Context, command *cmds.Command) ServeOption {
+func commandsOption(cctx oldcmds.Context, command *cmds.Command, allowGet bool) ServeOption {
 	return func(n *core.IpfsNode, l net.Listener, mux *http.ServeMux) (*http.ServeMux, error) {
 
 		cfg := cmdsHttp.NewServerConfig()
-		cfg.SetAllowedMethods("GET", "POST", "PUT")
+		cfg.AllowGet = allowGet
+		corsAllowedMethods := []string{http.MethodPost}
+		if allowGet {
+			corsAllowedMethods = append(corsAllowedMethods, http.MethodGet)
+		}
+
+		cfg.SetAllowedMethods(corsAllowedMethods...)
 		cfg.APIPath = APIPath
 		rcfg, err := n.Repo.Config()
 		if err != nil {
@@ -142,15 +148,15 @@ func commandsOption(cctx oldcmds.Context, command *cmds.Command) ServeOption {
 }
 
 // CommandsOption constructs a ServerOption for hooking the commands into the
-// HTTP server.
+// HTTP server. It will NOT allow GET requests.
 func CommandsOption(cctx oldcmds.Context) ServeOption {
-	return commandsOption(cctx, corecommands.Root)
+	return commandsOption(cctx, corecommands.Root, false)
 }
 
 // CommandsROOption constructs a ServerOption for hooking the read-only commands
-// into the HTTP server.
+// into the HTTP server. It will allow GET requests.
 func CommandsROOption(cctx oldcmds.Context) ServeOption {
-	return commandsOption(cctx, corecommands.RootRO)
+	return commandsOption(cctx, corecommands.RootRO, true)
 }
 
 // CheckVersionOption returns a ServeOption that checks whether the client ipfs version matches. Does nothing when the user agent string does not contain `/go-ipfs/`

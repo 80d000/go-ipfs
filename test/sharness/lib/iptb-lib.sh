@@ -14,7 +14,7 @@ ipfsi() {
 check_has_connection() {
   node="$1"
   ipfsi "$node" swarm peers >"swarm_peers_$node" &&
-  grep "ipfs" "swarm_peers_$node" >/dev/null
+  grep "p2p" "swarm_peers_$node" >/dev/null
 }
 
 iptb() {
@@ -36,15 +36,15 @@ startup_cluster() {
 
   if test -n "$other_args"; then
     test_expect_success "start up nodes with additional args" "
-      iptb start -wait -- ${other_args[@]}
+      iptb start -wait [0-$bound] -- ${other_args[@]}
     "
   else
     test_expect_success "start up nodes" '
-      iptb start -wait
+      iptb start -wait [0-$bound]
     '
   fi
 
-  test_expect_success "connect nodes to eachother" '
+  test_expect_success "connect nodes to each other" '
     iptb connect [1-$bound] 0
   '
 

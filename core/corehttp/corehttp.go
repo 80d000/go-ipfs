@@ -12,11 +12,11 @@ import (
 	"time"
 
 	core "github.com/ipfs/go-ipfs/core"
-	ma "gx/ipfs/QmNTCey11oxhb1AxDnQBRHtdhap6Ctud872NjAYPYYXPuc/go-multiaddr"
-	"gx/ipfs/QmSF8fPo3jgVBAy8fpdjjYqgG87dkJgUprRBHRd2tmfgpP/goprocess"
-	periodicproc "gx/ipfs/QmSF8fPo3jgVBAy8fpdjjYqgG87dkJgUprRBHRd2tmfgpP/goprocess/periodic"
-	manet "gx/ipfs/QmZcLBXKaFe8ND5YHPkJRAwmhJGrVsi1JqDZNyJ4nRK5Mj/go-multiaddr-net"
-	logging "gx/ipfs/QmcuXC5cxs79ro2cUuHs4HQ2bkDLJUYokwL8aivcX6HW3C/go-log"
+	logging "github.com/ipfs/go-log"
+	"github.com/jbenet/goprocess"
+	periodicproc "github.com/jbenet/goprocess/periodic"
+	ma "github.com/multiformats/go-multiaddr"
+	manet "github.com/multiformats/go-multiaddr/net"
 )
 
 var log = logging.Logger("core/server")
@@ -43,7 +43,17 @@ func makeHandler(n *core.IpfsNode, l net.Listener, options ...ServeOption) (http
 			return nil, err
 		}
 	}
-	return topMux, nil
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// ServeMux does not support requests with CONNECT method,
+		// so we need to handle them separately
+		// https://golang.org/src/net/http/request.go#L111
+		if r.Method == http.MethodConnect {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		topMux.ServeHTTP(w, r)
+	})
+	return handler, nil
 }
 
 // ListenAndServe runs an HTTP server listening at |listeningMultiAddr| with
@@ -63,13 +73,15 @@ func ListenAndServe(n *core.IpfsNode, listeningMultiAddr string, options ...Serv
 		return err
 	}
 
-	// we might have listened to /tcp/0 - lets see what we are listing on
+	// we might have listened to /tcp/0 - let's see what we are listing on
 	addr = list.Multiaddr()
 	fmt.Printf("API server listening on %s\n", addr)
 
 	return Serve(n, manet.NetListener(list), options...)
 }
 
+// Serve accepts incoming HTTP connections on the listener and pass them
+// to ServeOption handlers.
 func Serve(node *core.IpfsNode, lis net.Listener, options ...ServeOption) error {
 	// make sure we close this no matter what.
 	defer lis.Close()
@@ -85,7 +97,7 @@ func Serve(node *core.IpfsNode, lis net.Listener, options ...ServeOption) error 
 	}
 
 	select {
-	case <-node.Process().Closing():
+	case <-node.Process.Closing():
 		return fmt.Errorf("failed to start server, process closing")
 	default:
 	}
@@ -95,7 +107,7 @@ func Serve(node *core.IpfsNode, lis net.Listener, options ...ServeOption) error 
 	}
 
 	var serverError error
-	serverProc := node.Process().Go(func(p goprocess.Process) {
+	serverProc := node.Process.Go(func(p goprocess.Process) {
 		serverError = server.Serve(lis)
 	})
 
@@ -103,7 +115,7 @@ func Serve(node *core.IpfsNode, lis net.Listener, options ...ServeOption) error 
 	select {
 	case <-serverProc.Closed():
 	// if node being closed before server exits, close server
-	case <-node.Process().Closing():
+	case <-node.Process.Closing():
 		log.Infof("server at %s terminating...", addr)
 
 		warnProc := periodicproc.Tick(5*time.Second, func(_ goprocess.Process) {

@@ -69,10 +69,10 @@ test_object_cmd() {
   '
 
   test_expect_success "'ipfs object get' output looks good" '
-    echo "NumLinks: 0" > expected_stat &&
-    echo "BlockSize: 18" >> expected_stat &&
-    echo "LinksSize: 2" >> expected_stat &&
-    echo "DataSize: 16" >> expected_stat &&
+    echo "NumLinks:       0" > expected_stat &&
+    echo "BlockSize:      18" >> expected_stat &&
+    echo "LinksSize:      2" >> expected_stat &&
+    echo "DataSize:       16" >> expected_stat &&
     echo "CumulativeSize: 18" >> expected_stat &&
     test_cmp expected_stat actual_stat
   '
@@ -111,11 +111,11 @@ test_object_cmd() {
     cat ../t0051-object-data/testPut.xml | ipfs object put --inputenc=xml > actual_putStdinOut
   '
 
-  test_expect_success "'ipfs object put broken.xml' should fail" '
+  test_expect_failure "'ipfs object put broken.xml' should fail" '
     test_expect_code 1 ipfs object put ../t0051-object-data/brokenPut.xml --inputenc=xml 2>actual_putBrokenErr >actual_putBroken
   '
 
-  test_expect_success "'ipfs object put broken.hxml' output looks good" '
+  test_expect_failure "'ipfs object put broken.hxml' output looks good" '
     touch expected_putBroken &&
     printf "Error: no data or links in this node\n" > expected_putBrokenErr &&
     test_cmp expected_putBroken actual_putBroken &&
@@ -170,7 +170,7 @@ test_object_cmd() {
 
   test_expect_success "'ipfs object put broken.hjson' output looks good" '
     touch expected_putBroken &&
-    printf "Error: no data or links in this node\n" > expected_putBrokenErr &&
+    printf "Error: json: unknown field \"this\"\n" > expected_putBrokenErr &&
     test_cmp expected_putBroken actual_putBroken &&
     test_cmp expected_putBrokenErr actual_putBrokenErr
   '
@@ -206,7 +206,7 @@ test_object_cmd() {
     test_cmp expected actual
   '
 
-  test_expect_success "after gc, objects still acessible" '
+  test_expect_success "after gc, objects still accessible" '
     ipfs repo gc > /dev/null &&
     ipfs refs -r --timeout=2s $HASH > /dev/null
   '
@@ -221,6 +221,10 @@ test_object_cmd() {
     EMPTY_DIR=$(ipfs object new unixfs-dir) &&
     OUTPUT=$(ipfs object patch $EMPTY_DIR add-link foo $EMPTY_DIR) &&
     ipfs object stat $OUTPUT
+  '
+
+  test_expect_success "'ipfs object new foo' shouldn't crash" '
+    test_expect_code 1 ipfs object new foo
   '
 
   test_expect_success "'ipfs object links' gives the correct results" '
@@ -276,13 +280,27 @@ test_object_cmd() {
   '
 
   test_expect_success "ipfs object stat output looks good" '
-    echo NumLinks: 1 > obj_stat_exp &&
-    echo BlockSize: 47 >> obj_stat_exp &&
-    echo LinksSize: 45 >> obj_stat_exp &&
-    echo DataSize: 2 >> obj_stat_exp &&
-    echo CumulativeSize: 114 >> obj_stat_exp &&
+    echo "NumLinks:       1" > obj_stat_exp &&
+    echo "BlockSize:      47" >> obj_stat_exp &&
+    echo "LinksSize:      45" >> obj_stat_exp &&
+    echo "DataSize:       2" >> obj_stat_exp &&
+    echo "CumulativeSize: 114" >> obj_stat_exp &&
 
     test_cmp obj_stat_exp obj_stat_out
+  '
+
+  test_expect_success "'ipfs object stat --human' succeeds" '
+    ipfs object stat $(cat multi_patch)/a --human > obj_stat_human_out
+  '
+  
+  test_expect_success "ipfs object stat --human output looks good" '
+    echo "NumLinks:       1" > obj_stat_human_exp &&
+    echo "BlockSize:      47" >> obj_stat_human_exp &&
+    echo "LinksSize:      45" >> obj_stat_human_exp &&
+    echo "DataSize:       2" >> obj_stat_human_exp &&
+    echo "CumulativeSize: 114 B" >> obj_stat_human_exp &&
+
+    test_cmp obj_stat_human_exp obj_stat_human_out
   '
 
   test_expect_success "should have created dir within a dir" '
@@ -386,7 +404,7 @@ test_object_cmd() {
   '
 
   HASHv0=QmXg9Pp2ytZ14xgmQjYEiHjVjMFXzCVVEcRTWJBmLgR39V
-  HASHv1=z4CrgyEyhm4tAw1pgzQtNNuP7
+  HASHv1=bafkqadsimvwgy3zajb2w2yloeefau
 
   test_expect_success "ipfs object get with --cid-base=base32 uses base32 for CidV1 link only" '
     ipfs object get --cid-base=base32 $MIXED > mixed.actual &&
@@ -405,19 +423,19 @@ test_object_cmd() {
 test_object_content_type() {
 
   test_expect_success "'ipfs object get --encoding=protobuf' returns the correct content type" '
-    curl -sI "http://$API_ADDR/api/v0/object/get?arg=$HASH&encoding=protobuf" | grep -q "^Content-Type: application/protobuf"
+    curl -X POST -sI "http://$API_ADDR/api/v0/object/get?arg=$HASH&encoding=protobuf" | grep -q "^Content-Type: application/protobuf"
   '
 
   test_expect_success "'ipfs object get --encoding=json' returns the correct content type" '
-    curl -sI "http://$API_ADDR/api/v0/object/get?arg=$HASH&encoding=json" | grep -q "^Content-Type: application/json"
+    curl -X POST -sI "http://$API_ADDR/api/v0/object/get?arg=$HASH&encoding=json" | grep -q "^Content-Type: application/json"
   '
 
   test_expect_success "'ipfs object get --encoding=text' returns the correct content type" '
-    curl -sI "http://$API_ADDR/api/v0/object/get?arg=$HASH&encoding=text" | grep -q "^Content-Type: text/plain"
+    curl -X POST -sI "http://$API_ADDR/api/v0/object/get?arg=$HASH&encoding=text" | grep -q "^Content-Type: text/plain"
   '
 
   test_expect_success "'ipfs object get --encoding=xml' returns the correct content type" '
-    curl -sI "http://$API_ADDR/api/v0/object/get?arg=$HASH&encoding=xml" | grep -q "^Content-Type: application/xml"
+    curl -X POST -sI "http://$API_ADDR/api/v0/object/get?arg=$HASH&encoding=xml" | grep -q "^Content-Type: application/xml"
   '
 }
 

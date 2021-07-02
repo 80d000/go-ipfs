@@ -1,4 +1,4 @@
-// +build linux darwin freebsd netbsd openbsd
+// +build linux darwin freebsd
 // +build !nofuse
 
 package readonly
@@ -16,5 +16,5 @@ func Mount(ipfs *core.IpfsNode, mountpoint string) (mount.Mount, error) {
 	}
 	allow_other := cfg.Mounts.FuseAllowOther
 	fsys := NewFileSystem(ipfs)
-	return mount.NewMount(ipfs.Process(), fsys, mountpoint, allow_other)
+	return mount.NewMount(ipfs.Process, fsys, mountpoint, allow_other)
 }
