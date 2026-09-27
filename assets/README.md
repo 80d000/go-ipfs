@@ -1,13 +1,5 @@
 # Assets loaded in with IPFS
 
-## Generating docs
+This directory contains the go-ipfs assets:
 
-Do not edit the .go files directly.
-
-Instead, edit the source files and use `go generate` from within the
-assets directory:
-
-```
-go get -u github.com/jteeuwen/go-bindata/...
-go generate
-```
+* Getting started documentation (`init-doc`).

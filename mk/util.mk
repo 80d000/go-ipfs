@@ -9,28 +9,18 @@ else
 	PATH_SEP :=:
 endif
 
-SUPPORTED_PLATFORMS += windows-386
-SUPPORTED_PLATFORMS += windows-amd64
+# Platforms are now defined in .github/build-platforms.yml
+# The cmd/ipfs-try-build target is deprecated in favor of GitHub Actions
+# Use 'make supported' to see the list of platforms
 
-SUPPORTED_PLATFORMS += linux-arm
-SUPPORTED_PLATFORMS += linux-arm64
-SUPPORTED_PLATFORMS += linux-386
-SUPPORTED_PLATFORMS += linux-amd64
-
-SUPPORTED_PLATFORMS += darwin-386
-SUPPORTED_PLATFORMS += darwin-amd64
-
-SUPPORTED_PLATFORMS += freebsd-amd64
-
-space:=
-space+=
+space:=$() $()
 comma:=,
 join-with=$(subst $(space),$1,$(strip $2))
 
-# debug target, prints varaible. Example: `make print-GOFLAGS`
+# debug target, prints variable. Example: `make print-GOFLAGS`
 print-%:
 	@echo $*=$($*)
 
-# phony target that will mean that recipe is always exectued
+# phony target that will mean that recipe is always executed
 ALWAYS:
 .PHONY: ALWAYS

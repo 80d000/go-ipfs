@@ -1,9 +1,10 @@
-// +build darwin linux netbsd openbsd
+// Unix ulimit handling via getrlimit/setrlimit.
+//go:build darwin || linux || netbsd || openbsd
 
 package util
 
 import (
-	unix "gx/ipfs/QmVGjyM9i2msKvLXwh9VosCTgP4mL91kC7hDmqnwTTx6Hu/sys/unix"
+	unix "golang.org/x/sys/unix"
 )
 
 func init() {

@@ -13,7 +13,7 @@ test_add_cat_file() {
     ipfs add --help 2> add_help_err1 > /dev/null
   '
 
-  test_expect_success "stdin reading message doesnt show up" '
+  test_expect_success "stdin reading message doesn't show up" '
     test_expect_code 1 grep "ipfs: Reading from" add_help_err1 &&
     test_expect_code 1 grep "send Ctrl-d to stop." add_help_err1
   '
@@ -22,7 +22,7 @@ test_add_cat_file() {
     ipfs help add 2> add_help_err2 > /dev/null
   '
 
-  test_expect_success "stdin reading message doesnt show up" '
+  test_expect_success "stdin reading message doesn't show up" '
     test_expect_code 1 grep "ipfs: Reading from" add_help_err2 &&
     test_expect_code 1 grep "send Ctrl-d to stop." add_help_err2
   '
@@ -83,7 +83,7 @@ test_add_cat_file() {
     test_cmp expected actual
   '
 
-  test_expect_success "ipfs cat from negitive offset should fail" '
+  test_expect_success "ipfs cat from negative offset should fail" '
     test_expect_code 1 ipfs cat --offset -102 "$HASH" > actual
   '
 
@@ -132,7 +132,7 @@ test_add_cat_file() {
     test_cmp expected actual
   '
 
-  test_expect_success "ipfs cat with negitive length should fail" '
+  test_expect_success "ipfs cat with negative length should fail" '
     test_expect_code 1 ipfs cat --length -102 "$HASH" > actual
   '
 
@@ -193,6 +193,16 @@ test_add_cat_file() {
     test_expect_code 1 ipfs add -Q --chunker rabin-12-512-1024 mountdir/hello.txt
   '
 
+  test_expect_success "ipfs add --chunker buzhash succeeds" '
+    ipfs add --chunker buzhash mountdir/hello.txt >actual
+  '
+
+  test_expect_success "ipfs add --chunker buzhash output looks good" '
+    HASH="QmVr26fY1tKyspEJBniVhqxQeEjhF78XerGiqWAwraVLQH" &&
+    echo "added $HASH hello.txt" >expected &&
+    test_cmp expected actual
+  '
+
   test_expect_success "ipfs add on hidden file succeeds" '
     echo "Hello Worlds!" >mountdir/.hello.txt &&
     ipfs add mountdir/.hello.txt >actual
@@ -249,12 +259,12 @@ test_add_cat_file() {
     mkdir test_current_dir/hello &&
     echo "World" > test_current_dir/hello/world &&
     ( cd test_current_dir &&
-    ipfs add -r . | tail -n1 > ../actual && cd ../ ) &&
+    ipfs add -r -Q . > ../actual && cd ../ ) &&
     rm -r test_current_dir
   '
 
   test_expect_success "ipfs add -r . output looks good" '
-    echo "added QmZQWnfcqJ6hNkkPvrY9Q5X39GP3jUnUbAV4AbmbbR3Cb1 test_current_dir" > expected
+    echo "QmZQWnfcqJ6hNkkPvrY9Q5X39GP3jUnUbAV4AbmbbR3Cb1" > expected
     test_cmp expected actual
   '
 
@@ -264,12 +274,12 @@ test_add_cat_file() {
     mkdir test_current_dir/hello &&
     echo "World" > test_current_dir/hello/world &&
     ( cd test_current_dir &&
-    ipfs add -r ./ | tail -n1 > ../actual && cd ../ ) &&
+    ipfs add -r -Q ./ > ../actual && cd ../ ) &&
     rm -r test_current_dir
   '
 
   test_expect_success "ipfs add -r ./ output looks good" '
-    echo "added QmZQWnfcqJ6hNkkPvrY9Q5X39GP3jUnUbAV4AbmbbR3Cb1 test_current_dir" > expected
+    echo "QmZQWnfcqJ6hNkkPvrY9Q5X39GP3jUnUbAV4AbmbbR3Cb1" > expected
     test_cmp expected actual
   '
 
@@ -325,18 +335,161 @@ test_add_cat_file() {
     test_cmp expected actual
   '
 
+  test_expect_success "ipfs add with multiple files succeeds" '
+    echo "Helloo Worlds!" >mountdir/hello2.txt &&
+    ipfs add mountdir/hello.txt mountdir/hello2.txt >actual
+  '
+
+  test_expect_success "ipfs add with multiple files output looks good" '
+    echo "added QmVr26fY1tKyspEJBniVhqxQeEjhF78XerGiqWAwraVLQH hello.txt" >expected &&
+    echo "added Qmf35k66MZNW2GijohUmXQEWKZU4cCGTCwK6idfnt152wJ hello2.txt" >> expected &&
+    test_cmp expected actual
+  '
+
+  test_expect_success "ipfs add with multiple files of same name and import dir succeeds" '
+    ipfs add mountdir/hello.txt mountdir/hello.txt >actual
+  '
+
+  test_expect_success "ipfs add with multiple files of same name output looks good" '
+    echo "added QmVr26fY1tKyspEJBniVhqxQeEjhF78XerGiqWAwraVLQH hello.txt" >expected &&
+    test_cmp expected actual
+  '
+
+    test_expect_success "ipfs add with multiple files of same name but different dirs fails" '
+      mkdir -p mountdir/same-file/ &&
+      cp mountdir/hello.txt mountdir/same-file/hello.txt &&
+      test_expect_code 1 ipfs add mountdir/hello.txt mountdir/same-file/hello.txt >actual &&
+      rm mountdir/same-file/hello.txt  &&
+      rmdir mountdir/same-file
+    '
+
+  ## --to-files with single source
+
+  test_expect_success "ipfs add --to-files /mfspath succeeds" '
+    mkdir -p mountdir && echo "Hello MFS!" > mountdir/mfs.txt &&
+    ipfs add mountdir/mfs.txt --to-files /ipfs-add-to-files >actual
+  '
+
+  test_expect_success "ipfs add --to-files output looks good" '
+    HASH_MFS="QmVT8bL3sGBA2TwvX8JPhrv5CYZL8LLLfW7mxkUjPZsgBr" &&
+    echo "added $HASH_MFS mfs.txt" >expected &&
+    test_cmp expected actual
+  '
+
+  test_expect_success "ipfs files read succeeds" '
+    ipfs files read /ipfs-add-to-files >actual &&
+    ipfs files rm /ipfs-add-to-files
+  '
+
+  test_expect_success "ipfs cat output looks good" '
+    echo "Hello MFS!" >expected &&
+    test_cmp expected actual
+  '
+
+  test_expect_success "ipfs add --to-files requires argument" '
+    test_expect_code 1 ipfs add mountdir/mfs.txt --to-files >actual 2>&1 &&
+    test_should_contain "Error: missing argument for option \"to-files\"" actual
+  '
+
+  test_expect_success "ipfs add --to-files / (MFS root) works" '
+    echo "Hello MFS!" >expected &&
+    ipfs add mountdir/mfs.txt --to-files / &&
+    ipfs files read /mfs.txt >actual &&
+    test_cmp expected actual &&
+    ipfs files rm /mfs.txt &&
+    rm mountdir/mfs.txt
+  '
+
+  ## --to-files with multiple sources
+
+  test_expect_success "ipfs add file1 file2 --to-files /mfspath0 (without trailing slash) fails" '
+    mkdir -p test &&
+    echo "file1" > test/mfs1.txt &&
+    echo "file2" > test/mfs2.txt &&
+    test_expect_code 1 ipfs add test/mfs1.txt test/mfs2.txt --to-files /mfspath0 >actual 2>&1 &&
+    test_should_contain "MFS destination is a file: only one entry can be copied to \"/mfspath0\"" actual &&
+    ipfs files rm -r --force /mfspath0
+  '
+
+  test_expect_success "ipfs add file1 file2 --to-files /mfsfile1 (without trailing slash + with preexisting file) fails" '
+    echo test | ipfs files write --create /mfsfile1 &&
+    test_expect_code 1 ipfs add test/mfs1.txt test/mfs2.txt --to-files /mfsfile1 >actual 2>&1 &&
+    test_should_contain "Error: to-files: cannot put node in path \"/mfsfile1\"" actual &&
+    ipfs files rm -r --force /mfsfile1
+  '
+
+  test_expect_success "ipfs add file1 file2 --to-files /mfsdir1 (without trailing slash + with preexisting dir) fails" '
+    ipfs files mkdir -p /mfsdir1 &&
+    test_expect_code 1 ipfs add test/mfs1.txt test/mfs2.txt --to-files /mfsdir1 >actual 2>&1 &&
+    test_should_contain "Error: to-files: cannot put node in path \"/mfsdir1\"" actual &&
+    ipfs files rm -r --force /mfsdir1
+  '
+
+  test_expect_success "ipfs add file1 file2 --to-files /mfsdir2/ (with trailing slash) succeeds" '
+    ipfs files mkdir -p /mfsdir2 &&
+    test_expect_code 0 ipfs add --cid-version 1 test/mfs1.txt test/mfs2.txt --to-files /mfsdir2/ > actual 2>&1 &&
+    test_should_contain "added bafkreihm3rktn5z33luic3youqdsn326toaq3ekesmdvsa53sbrd3f5r3a mfs1.txt" actual &&
+    test_should_contain "added bafkreidh5zkhr2vnwa2luwmuj24xo6l3jhfgvkgtk5cyp43oxs7owzpxby mfs2.txt" actual &&
+    test_should_not_contain "Error" actual &&
+    ipfs files ls /mfsdir2/ > lsout &&
+    test_should_contain "mfs1.txt" lsout &&
+    test_should_contain "mfs2.txt" lsout &&
+    ipfs files rm -r --force /mfsdir2
+  '
+
+  test_expect_success "ipfs add file1 file2 --to-files /mfsfile2/ (with  trailing slash + with preexisting file) fails" '
+    echo test | ipfs files write --create /mfsfile2 &&
+    test_expect_code 1 ipfs add test/mfs1.txt test/mfs2.txt --to-files /mfsfile2/ >actual 2>&1 &&
+    test_should_contain "Error: to-files: MFS destination \"/mfsfile2/\" is not a directory" actual &&
+    ipfs files rm -r --force /mfsfile2
+  '
+
+  ## --to-files with recursive dir
+
+  # test MFS destination without trailing slash
+  test_expect_success "ipfs add with --to-files /mfs/subdir3 fails because /mfs/subdir3 exists" '
+    ipfs files mkdir -p /mfs/subdir3 &&
+    test_expect_code 1 ipfs add -r test --to-files /mfs/subdir3 >actual 2>&1 &&
+    test_should_contain "cannot put node in path \"/mfs/subdir3\": directory already has entry by that name" actual &&
+    ipfs files rm -r --force /mfs
+  '
+
+  # test recursive import of a dir  into MFS subdirectory
+  test_expect_success "ipfs add -r dir --to-files /mfs/subdir4/ succeeds (because of trailing slash)" '
+    ipfs files mkdir -p /mfs/subdir4 &&
+    ipfs add --cid-version 1 -r test --to-files /mfs/subdir4/ >actual 2>&1 &&
+    test_should_contain "added bafkreihm3rktn5z33luic3youqdsn326toaq3ekesmdvsa53sbrd3f5r3a test/mfs1.txt" actual &&
+    test_should_contain "added bafkreidh5zkhr2vnwa2luwmuj24xo6l3jhfgvkgtk5cyp43oxs7owzpxby test/mfs2.txt" actual &&
+    test_should_contain "added bafybeic7xwqwovt4g4bax6d3udp6222i63vj2rblpbim7uy2uw4a5gahha test" actual &&
+    test_should_not_contain "Error" actual
+    ipfs files ls /mfs/subdir4/ > lsout &&
+    test_should_contain "test" lsout &&
+    test_should_not_contain "mfs1.txt" lsout &&
+    test_should_not_contain "mfs2.txt" lsout &&
+    ipfs files rm -r --force /mfs
+  '
+
+  # confirm -w and --to-files are exclusive
+  # context: https://github.com/ipfs/kubo/issues/10611
+  test_expect_success "ipfs add -r -w dir --to-files /mfs/subdir5/ errors (-w and --to-files are exclusive)" '
+    ipfs files mkdir -p /mfs/subdir5 &&
+    test_expect_code 1 ipfs add -r -w test --to-files /mfs/subdir5/ >actual 2>&1 &&
+    test_should_contain "Error" actual &&
+    ipfs files rm -r --force /mfs
+  '
+
 }
 
 test_add_cat_5MB() {
   ADD_FLAGS="$1"
   EXP_HASH="$2"
 
-  test_expect_success "generate 5MB file using go-random" '
-    random 5242880 41 >mountdir/bigfile
+  test_expect_success "generate 5MB file using random-data" '
+    random-data -size=5242880 -seed=41 >mountdir/bigfile
   '
 
   test_expect_success "sha1 of the file looks ok" '
-    echo "11145620fb92eb5a49c9986b5c6844efda37e471660e" >sha1_expected &&
+    echo "11141d13cfb2c207591376e06bc2360741c2009b2898" >sha1_expected &&
     multihash -a=sha1 -e=hex mountdir/bigfile >sha1_actual &&
     test_cmp sha1_expected sha1_actual
   '
@@ -412,7 +565,7 @@ test_add_cat_raw() {
   '
 
   test_expect_success "zero length file has correct hash" '
-    test "$ZEROHASH" = zb2rhmy65F3REf8SZp7De11gxtECBGgUKaLdiDj7MCGCHxbDW
+    test "$ZEROHASH" = bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku
   '
 
   test_expect_success "cat zero length file" '
@@ -441,12 +594,12 @@ test_add_cat_expensive() {
   ADD_FLAGS="$1"
   HASH="$2"
 
-  test_expect_success EXPENSIVE "generate 100MB file using go-random" '
-    random 104857600 42 >mountdir/bigfile
+  test_expect_success EXPENSIVE "generate 100MB file using random-data" '
+    random-data -size=104857600 -seed=42 >mountdir/bigfile
   '
 
   test_expect_success EXPENSIVE "sha1 of the file looks ok" '
-    echo "1114885b197b01e0f7ff584458dc236cb9477d2e736d" >sha1_expected &&
+    echo "1114acba57d18295a18b428faf88960fa47a71eb22cc" >sha1_expected &&
     multihash -a=sha1 -e=hex mountdir/bigfile >sha1_actual &&
     test_cmp sha1_expected sha1_actual
   '
@@ -470,29 +623,29 @@ test_add_cat_expensive() {
   '
 
   test_expect_success EXPENSIVE "ipfs cat output hashed looks good" '
-    echo "1114885b197b01e0f7ff584458dc236cb9477d2e736d" >sha1_expected &&
+    echo "1114acba57d18295a18b428faf88960fa47a71eb22cc" >sha1_expected &&
     test_cmp sha1_expected sha1_actual
   '
 
   test_expect_success FUSE,EXPENSIVE "cat ipfs/bigfile succeeds" '
-    cat "ipfs/$HASH" | multihash -a=sha1 -e=hex >sha1_actual
+    cat "ipfs/$HASH" | multihash -a=sha1 -e=hex >sha1_actual-Y
   '
 
   test_expect_success FUSE,EXPENSIVE "cat ipfs/bigfile looks good" '
-    test_cmp sha1_expected sha1_actual
+    test_cmp sha1_expected sha1_actual-Y
   '
 }
 
 test_add_named_pipe() {
-  err_prefix=$1
-  test_expect_success "useful error message when adding a named pipe" '
-    mkfifo named-pipe &&
-    test_expect_code 1 ipfs add named-pipe 2>actual &&
-    STAT=$(generic_stat named-pipe) &&
-    rm named-pipe &&
-    grep "Error: unrecognized file type for named-pipe: $STAT" actual &&
-    grep USAGE actual &&
-    grep "ipfs add" actual
+  test_expect_success "Adding named pipes explicitly works" '
+    mkfifo named-pipe1 &&
+    ( echo foo > named-pipe1 & echo "added $( echo foo | ipfs add -nq ) named-pipe1" > expected_named_pipes_add ) &&
+    mkfifo named-pipe2 &&
+    ( echo bar > named-pipe2 & echo "added $( echo bar | ipfs add -nq ) named-pipe2" >> expected_named_pipes_add ) &&
+    ipfs add -n named-pipe1 named-pipe2 >actual_pipe_add &&
+    rm named-pipe1 &&
+    rm named-pipe2 &&
+    test_cmp expected_named_pipes_add actual_pipe_add
   '
 
   test_expect_success "useful error message when recursively adding a named pipe" '
@@ -500,7 +653,7 @@ test_add_named_pipe() {
     mkfifo named-pipe-dir/named-pipe &&
     STAT=$(generic_stat named-pipe-dir/named-pipe) &&
     test_expect_code 1 ipfs add -r named-pipe-dir 2>actual &&
-    printf "Error:$err_prefix unrecognized file type for named-pipe-dir/named-pipe: $STAT\n" >expected &&
+    printf "Error: unrecognized file type for named-pipe-dir/named-pipe: $STAT\n" >expected &&
     rm named-pipe-dir/named-pipe &&
     rmdir named-pipe-dir &&
     test_cmp expected actual
@@ -705,23 +858,23 @@ VENUS="QmU5kp3BH3B8tnWUU2Pikdb2maksBNkb92FHRr56hyghh4"
 add_directory
 
 PLANETS="QmfWfQfKCY5Ukv9peBbxM5vqWM9BzmqUSXvdCgjT2wsiBT"
-MARS="zb2rhZdTkQNawVajsTNiYc9cTPHqgLdJVvBRkZok9RjkgQYRU"
-VENUS="zb2rhn6TGvnUaMAg4VV4y9HVx5W42HihcH4jsyrDv8mkepFqq"
+MARS="bafkreibmlvvgdyihetgocpof6xk64kjjzdeq2e4c7hqs3krdheosk4tgj4"
+VENUS="bafkreihfsphazrk2ilejpekyltjeh5k4yvwgjuwg26ueafohqioeo3sdca"
 add_directory '--raw-leaves'
 
-PLANETS="zdj7Wnbun6P41Z5ddTkNvZaDTmQ8ZLdiKFcJrL9sV87rPScMP"
-MARS="zb2rhZdTkQNawVajsTNiYc9cTPHqgLdJVvBRkZok9RjkgQYRU"
-VENUS="zb2rhn6TGvnUaMAg4VV4y9HVx5W42HihcH4jsyrDv8mkepFqq"
+PLANETS="bafybeih7e5dmkyk25up5vxug4q3hrg2fxbzf23dfrac2fns5h7z4aa7ioi"
+MARS="bafkreibmlvvgdyihetgocpof6xk64kjjzdeq2e4c7hqs3krdheosk4tgj4"
+VENUS="bafkreihfsphazrk2ilejpekyltjeh5k4yvwgjuwg26ueafohqioeo3sdca"
 add_directory '--cid-version=1'
 
-PLANETS="zdj7WiC51v78BjBcmZR7uuBvmDWxSn5EDr5MiyTwE18e8qvb7"
-MARS="zdj7WWx6fGNrNGkdpkuTAxCjKbQ1pPtarqA6VQhedhLTZu34J"
-VENUS="zdj7WbB1BUF8WejmVpQCmMLd1RbPnxJtvAj1Lep6eTmXRFbrz"
+PLANETS="bafybeif5tuep5ap2d7zyhbktucey75aoacxufgt6i3v4gebmixyipnyp7y"
+MARS="bafybeiawta2ntdmsy24aro35w3homzl4ak7svr3si7l7gesvq4erglyye4"
+VENUS="bafybeicvkvhs2fr75ynebtdjqpgm4g2fc63abqbmysupwpmcjl4gx7mzrm"
 add_directory '--cid-version=1 --raw-leaves=false'
 
-PLANETS="zDMZof1kqxDAx9myQbXsyWwyWP9qRPsXsWH7XuTz6isT7Rh1S6nM"
-MARS="zCT5htkdz1ZBHYVQXFQn51ngPXLVqaHSWoae87V1d6e9qWpSAjXw"
-VENUS="zCT5htke5JcdoMM4WhmUKXWf2QC3TnQToqGZHH1WsZERv6kPhFPg"
+PLANETS="bafykbzaceaptbcs7ik5mdfpot3b4ackvxlwh7loc5jcrtkayf64ukl7zyk46e"
+MARS="bafk2bzaceaqcxw46uzkyd2jmczoogof6pnkqt4dpiv3pwkunsv4g5rkkmecie"
+VENUS="bafk2bzacebxnke2fb5mgzxyjuuavvcfht4fd3gvn4klkujz6k72wboynhuvfw"
 add_directory '--hash=blake2b-256'
 
 test_expect_success "'ipfs add -rn' succeeds" '
@@ -729,17 +882,17 @@ test_expect_success "'ipfs add -rn' succeeds" '
   mkdir -p mountdir/moons/saturn &&
   echo "Hello Europa!" >mountdir/moons/jupiter/europa.txt &&
   echo "Hello Titan!" >mountdir/moons/saturn/titan.txt &&
-  echo "hey youre no moon!" >mountdir/moons/mercury.txt &&
+  echo "hey you are no moon!" >mountdir/moons/mercury.txt &&
   ipfs add -rn mountdir/moons >actual
 '
 
 test_expect_success "'ipfs add -rn' output looks good" '
-  MOONS="QmVKvomp91nMih5j6hYBA8KjbiaYvEetU2Q7KvtZkLe9nQ" &&
+  MOONS="QmbGoaQZm8kjYfCiN1aBsgwhqfUBGDYTrDb91Mz7Dvq81B" &&
   EUROPA="Qmbjg7zWdqdMaK2BucPncJQDxiALExph5k3NkQv5RHpccu" &&
   JUPITER="QmS5mZddhFPLWFX3w6FzAy9QxyYkaxvUpsWCtZ3r7jub9J" &&
   SATURN="QmaMagZT4rTE7Nonw8KGSK4oe1bh533yhZrCo1HihSG8FK" &&
   TITAN="QmZzppb9WHn552rmRqpPfgU5FEiHH6gDwi3MrB9cTdPwdb" &&
-  MERCURY="QmUJjVtnN8YEeYcS8VmUeWffTWhnMQAkk5DzZdKnPhqUdK" &&
+  MERCURY="QmRsTB5CpEUvDUpDgHCzb3VftZ139zrk9zs5ZcgYh9TMPJ" &&
   echo "added $EUROPA moons/jupiter/europa.txt" >expected &&
   echo "added $MERCURY moons/mercury.txt" >>expected &&
   echo "added $TITAN moons/saturn/titan.txt" >>expected &&
@@ -749,44 +902,44 @@ test_expect_success "'ipfs add -rn' output looks good" '
   test_cmp expected actual
 '
 
-test_expect_success "go-random is installed" '
-  type random
+test_expect_success "random-data is installed" '
+  type random-data
 '
 
-test_add_cat_5MB "" "QmSr7FqYkxYWGoSfy8ZiaMWQ5vosb18DQGCzjwEQnVHkTb"
+test_add_cat_5MB "" "QmbW8FAUE5nJ2EccaFGLQtubacZr9VP1m6KLBniL7yzXpF"
 
-test_add_cat_5MB --raw-leaves "QmbdLHCmdi48eM8T7D67oXjA1S2Puo8eMfngdHhdPukFd6"
+test_add_cat_5MB --raw-leaves "Qmf6a54RFHB3sAH5Beh5pha6Y8UZz22pfDKZAgmQ2UvLJH"
 
 # note: the specified hash implies that internal nodes are stored
 # using CidV1 and leaves are stored using raw blocks
-test_add_cat_5MB --cid-version=1 "zdj7WiiaedqVBXjX4SNqx3jfuZideDqdLYnDzCDJ66JDMK9o2"
+test_add_cat_5MB --cid-version=1 "bafybeihy7ngsovmm2dqanlpjeddvs7kshb4bdwrue3pe5nsf6rkn3hg45y"
 
 # note: the specified hash implies that internal nodes are stored
 # using CidV1 and leaves are stored using CidV1 but using the legacy
 # format (i.e. not raw)
-test_add_cat_5MB '--cid-version=1 --raw-leaves=false' "zdj7WfgEsj897BBZj2mcfsRLhaPZcCixPV2G7DkWgF1Wdr64P"
+test_add_cat_5MB '--cid-version=1 --raw-leaves=false' "bafybeie4nox52gy5qpv5bhbrzrfgpwwdfpk257v2ixy66whvqdjd67r3fq"
 
 # note: --hash=blake2b-256 implies --cid-version=1 which implies --raw-leaves=true
 # the specified hash represents the leaf nodes stored as raw leaves and
-# encoded with the blake2b-256 hash funtion
-test_add_cat_5MB '--hash=blake2b-256' "zDMZof1kuxn7ebvKyvmkYLPvocSvFYxxAWT1yQBN1wWiXXr7w5mY"
+# encoded with the blake2b-256 hash function
+test_add_cat_5MB '--hash=blake2b-256' "bafykbzacebiss6bbf5ynrrcsweg66zau5p6w2a52scmpgcxaaeqremw5vpy22"
 
 # the specified hash represents the leaf nodes stored as protoful nodes and
-# encoded with the blake2b-256 hash funtion
-test_add_cat_5MB '--hash=blake2b-256 --raw-leaves=false' "zDMZof1krz3SFTyhboRyWZyUP2qNgVdn9wjtaX211aHJ8WgeyT9v"
+# encoded with the blake2b-256 hash function
+test_add_cat_5MB '--hash=blake2b-256 --raw-leaves=false' "bafykbzacecn3yylzcrinh2mf3kcwxrql4haddl6pb4wmnkc6wurtfqi2mghhy"
 
-test_add_cat_expensive "" "QmU9SWAPPmNEKZB8umYMmjYvN7VyHqABNvdA6GUi4MMEz3"
+test_add_cat_expensive "" "QmPYo95xiEmcqiqWpqg9iwHgcbWi7n4fQuP27xCNQLmytG"
 
 # note: the specified hash implies that internal nodes are stored
 # using CidV1 and leaves are stored using raw blocks
-test_add_cat_expensive "--cid-version=1" "zdj7WcatQrtuE4WMkS4XsfsMixuQN2po4irkYhqxeJyW1wgCq"
+test_add_cat_expensive "--cid-version=1" "bafybeidwwhjvrpu2j34ppvr2swm2u55ljcuhqzm7s5xd7rlsvlu7ny2rry"
 
 # note: --hash=blake2b-256 implies --cid-version=1 which implies --raw-leaves=true
 # the specified hash represents the leaf nodes stored as raw leaves and
-# encoded with the blake2b-256 hash funtion
-test_add_cat_expensive '--hash=blake2b-256' "zDMZof1kwndounDzQCANUHjiE3zt1mPEgx7RE3JTHoZrRRa79xcv"
+# encoded with the blake2b-256 hash function
+test_add_cat_expensive '--hash=blake2b-256' "bafykbzacebosow2qjoynvjq2qmjuhh6qgkxqwjpqqreucu5idbq3n75wobtxa"
 
-test_add_named_pipe " Post http://$API_ADDR/api/v0/add?chunker=size-262144&encoding=json&hash=sha2-256&inline-limit=32&pin=true&progress=true&recursive=true&stream-channels=true:"
+test_add_named_pipe
 
 test_add_pwd_is_symlink
 
@@ -817,12 +970,12 @@ test_expect_success "ipfs cat file fails" '
   test_must_fail ipfs cat $(cat oh_hash)
 '
 
-test_add_named_pipe ""
+test_add_named_pipe
 
 test_add_pwd_is_symlink
 
 # Test daemon in offline mode
-test_launch_ipfs_daemon --offline
+test_launch_ipfs_daemon_without_network
 
 test_add_cat_file
 

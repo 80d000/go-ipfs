@@ -1,10 +1,11 @@
-// +build testrunmain
+// Only built when collecting coverage via "go test -tags testrunmain".
+//go:build testrunmain
 
 package main
 
 import (
 	"fmt"
-	"io/ioutil"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -18,13 +19,13 @@ func main() {
 		fmt.Println("IPFS_COVER_DIR not defined")
 		os.Exit(1)
 	}
-	coverFile, err := ioutil.TempFile(coverDir, "coverage-")
+	coverFile, err := os.CreateTemp(coverDir, "coverage-")
 	if err != nil {
 		fmt.Println(err.Error())
 		os.Exit(1)
 	}
 
-	retFile, err := ioutil.TempFile("", "cover-ret-file")
+	retFile, err := os.CreateTemp("", "cover-ret-file")
 	if err != nil {
 		fmt.Println(err.Error())
 		os.Exit(1)
@@ -43,21 +44,32 @@ func main() {
 		Pdeathsig: syscall.SIGTERM,
 	}
 
-	sig := make(chan os.Signal, 1)
+	sig := make(chan os.Signal, 10)
+	start := make(chan struct{})
 	go func() {
+		<-start
 		for {
 			p.Process.Signal(<-sig)
 		}
 	}()
+
 	signal.Notify(sig, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM)
 
-	err = p.Run()
+	err = p.Start()
 	if err != nil {
 		fmt.Println(err.Error())
 		os.Exit(1)
 	}
 
-	b, err := ioutil.ReadAll(retFile)
+	close(start)
+
+	err = p.Wait()
+	if err != nil {
+		fmt.Println(err.Error())
+		os.Exit(1)
+	}
+
+	b, err := io.ReadAll(retFile)
 	if err != nil {
 		fmt.Println(err.Error())
 		os.Exit(1)

@@ -18,8 +18,7 @@ test_expect_success "creating files succeeds" '
 
 test_add_symlinks() {
   test_expect_success "ipfs add files succeeds" '
-    ipfs add -q -r files >filehash_all &&
-    tail -n 1 filehash_all >filehash_out
+    ipfs add -Q -r files >filehash_out
   '
 
   test_expect_success "output looks good" '
@@ -28,13 +27,12 @@ test_add_symlinks() {
   '
 
   test_expect_success "ipfs add --cid-version=1 files succeeds" '
-    ipfs add -q -r --cid-version=1 files >filehash_all &&
-    tail -n 1 filehash_all >filehash_out
+    ipfs add -Q -r --cid-version=1 files >filehash_out
   '
 
   test_expect_success "output looks good" '
     # note this hash implies all internal nodes are stored using CidV1
-    echo zdj7WZDQ2xMmr4qn6aRZTsE9fCUs2KmvPigpHdpssqUobwcWK > filehash_exp &&
+    echo bafybeibyhlx64cklod6isy3h7tsmr4qvam3ae3b74n3hfes5bythjrwyua > filehash_exp &&
     test_cmp filehash_exp filehash_out
   '
 

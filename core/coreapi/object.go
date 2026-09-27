@@ -1,28 +1,20 @@
 package coreapi
 
 import (
-	"bytes"
 	"context"
-	"encoding/base64"
-	"encoding/json"
-	"encoding/xml"
-	"errors"
 	"fmt"
-	"io"
-	"io/ioutil"
 
-	coreiface "github.com/ipfs/go-ipfs/core/coreapi/interface"
-	caopts "github.com/ipfs/go-ipfs/core/coreapi/interface/options"
-	"github.com/ipfs/go-ipfs/dagutils"
-	"github.com/ipfs/go-ipfs/pin"
+	dag "github.com/ipfs/boxo/ipld/merkledag"
+	"github.com/ipfs/boxo/ipld/merkledag/dagutils"
+	ft "github.com/ipfs/boxo/ipld/unixfs"
+	"github.com/ipfs/boxo/path"
+	coreiface "github.com/ipfs/kubo/core/coreiface"
+	caopts "github.com/ipfs/kubo/core/coreiface/options"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
-	cid "gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
-	ipld "gx/ipfs/QmRL22E4paat7ky7vx9MLpR97JHHbFPrg3ytFQw6qp1y1s/go-ipld-format"
-	dag "gx/ipfs/QmUtsx89yiCY6F8mbpP6ecXckiSzCBH7EvkKZuZEHBcr1m/go-merkledag"
-	ft "gx/ipfs/QmZArMcsVDsXdcLbUx4844CuqKXBpbxdeiryM4cnmGTNRq/go-unixfs"
+	"github.com/ipfs/kubo/tracing"
 )
-
-const inputLimit = 2 << 20
 
 type ObjectAPI CoreAPI
 
@@ -36,182 +28,64 @@ type Node struct {
 	Data  string
 }
 
-func (api *ObjectAPI) New(ctx context.Context, opts ...caopts.ObjectNewOption) (ipld.Node, error) {
-	options, err := caopts.ObjectNewOptions(opts...)
-	if err != nil {
-		return nil, err
-	}
+func (api *ObjectAPI) AddLink(ctx context.Context, base path.Path, name string, child path.Path, opts ...caopts.ObjectAddLinkOption) (path.ImmutablePath, error) {
+	ctx, span := tracing.Span(ctx, "CoreAPI.ObjectAPI", "AddLink", trace.WithAttributes(
+		attribute.String("base", base.String()),
+		attribute.String("name", name),
+		attribute.String("child", child.String()),
+	))
+	defer span.End()
 
-	var n ipld.Node
-	switch options.Type {
-	case "empty":
-		n = new(dag.ProtoNode)
-	case "unixfs-dir":
-		n = ft.EmptyDirNode()
-	}
-
-	err = api.dag.Add(ctx, n)
-	if err != nil {
-		return nil, err
-	}
-	return n, nil
-}
-
-func (api *ObjectAPI) Put(ctx context.Context, src io.Reader, opts ...caopts.ObjectPutOption) (coreiface.ResolvedPath, error) {
-	options, err := caopts.ObjectPutOptions(opts...)
-	if err != nil {
-		return nil, err
-	}
-
-	data, err := ioutil.ReadAll(io.LimitReader(src, inputLimit+10))
-	if err != nil {
-		return nil, err
-	}
-
-	var dagnode *dag.ProtoNode
-	switch options.InputEnc {
-	case "json":
-		node := new(Node)
-		err = json.Unmarshal(data, node)
-		if err != nil {
-			return nil, err
-		}
-
-		// check that we have data in the Node to add
-		// otherwise we will add the empty object without raising an error
-		if nodeEmpty(node) {
-			return nil, errors.New("no data or links in this node")
-		}
-
-		dagnode, err = deserializeNode(node, options.DataType)
-		if err != nil {
-			return nil, err
-		}
-
-	case "protobuf":
-		dagnode, err = dag.DecodeProtobuf(data)
-
-	case "xml":
-		node := new(Node)
-		err = xml.Unmarshal(data, node)
-		if err != nil {
-			return nil, err
-		}
-
-		// check that we have data in the Node to add
-		// otherwise we will add the empty object without raising an error
-		if nodeEmpty(node) {
-			return nil, errors.New("no data or links in this node")
-		}
-
-		dagnode, err = deserializeNode(node, options.DataType)
-		if err != nil {
-			return nil, err
-		}
-
-	default:
-		return nil, errors.New("unknown object encoding")
-	}
-
-	if err != nil {
-		return nil, err
-	}
-
-	if options.Pin {
-		defer api.blockstore.PinLock().Unlock()
-	}
-
-	err = api.dag.Add(ctx, dagnode)
-	if err != nil {
-		return nil, err
-	}
-
-	if options.Pin {
-		api.pinning.PinWithMode(dagnode.Cid(), pin.Recursive)
-		err = api.pinning.Flush()
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	return coreiface.IpfsPath(dagnode.Cid()), nil
-}
-
-func (api *ObjectAPI) Get(ctx context.Context, path coreiface.Path) (ipld.Node, error) {
-	return api.core().ResolveNode(ctx, path)
-}
-
-func (api *ObjectAPI) Data(ctx context.Context, path coreiface.Path) (io.Reader, error) {
-	nd, err := api.core().ResolveNode(ctx, path)
-	if err != nil {
-		return nil, err
-	}
-
-	pbnd, ok := nd.(*dag.ProtoNode)
-	if !ok {
-		return nil, dag.ErrNotProtobuf
-	}
-
-	return bytes.NewReader(pbnd.Data()), nil
-}
-
-func (api *ObjectAPI) Links(ctx context.Context, path coreiface.Path) ([]*ipld.Link, error) {
-	nd, err := api.core().ResolveNode(ctx, path)
-	if err != nil {
-		return nil, err
-	}
-
-	links := nd.Links()
-	out := make([]*ipld.Link, len(links))
-	for n, l := range links {
-		out[n] = (*ipld.Link)(l)
-	}
-
-	return out, nil
-}
-
-func (api *ObjectAPI) Stat(ctx context.Context, path coreiface.Path) (*coreiface.ObjectStat, error) {
-	nd, err := api.core().ResolveNode(ctx, path)
-	if err != nil {
-		return nil, err
-	}
-
-	stat, err := nd.Stat()
-	if err != nil {
-		return nil, err
-	}
-
-	out := &coreiface.ObjectStat{
-		Cid:            nd.Cid(),
-		NumLinks:       stat.NumLinks,
-		BlockSize:      stat.BlockSize,
-		LinksSize:      stat.LinksSize,
-		DataSize:       stat.DataSize,
-		CumulativeSize: stat.CumulativeSize,
-	}
-
-	return out, nil
-}
-
-func (api *ObjectAPI) AddLink(ctx context.Context, base coreiface.Path, name string, child coreiface.Path, opts ...caopts.ObjectAddLinkOption) (coreiface.ResolvedPath, error) {
 	options, err := caopts.ObjectAddLinkOptions(opts...)
 	if err != nil {
-		return nil, err
+		return path.ImmutablePath{}, err
 	}
+	span.SetAttributes(attribute.Bool("create", options.Create))
 
 	baseNd, err := api.core().ResolveNode(ctx, base)
 	if err != nil {
-		return nil, err
+		return path.ImmutablePath{}, err
 	}
 
 	childNd, err := api.core().ResolveNode(ctx, child)
 	if err != nil {
-		return nil, err
+		return path.ImmutablePath{}, err
 	}
 
 	basePb, ok := baseNd.(*dag.ProtoNode)
 	if !ok {
-		return nil, dag.ErrNotProtobuf
+		return path.ImmutablePath{}, dag.ErrNotProtobuf
+	}
+
+	// This command operates at the dag-pb level via dagutils.Editor, which
+	// only manipulates ProtoNode links without updating UnixFS metadata.
+	// Only plain UnixFS Directory nodes are safe to mutate this way.
+	// File nodes: adding links corrupts Blocksizes, content lost on read-back.
+	// HAMTShard nodes: bitfield not updated, shard trie becomes inconsistent.
+	// https://specs.ipfs.tech/unixfs/#pbnode-links-name
+	// https://github.com/ipfs/kubo/issues/7190
+	if !options.SkipUnixFSValidation {
+		fsNode, err := ft.FSNodeFromBytes(basePb.Data())
+		if err != nil {
+			return path.ImmutablePath{}, fmt.Errorf(
+				"cannot add named links to a non-UnixFS dag-pb node; " +
+					"pass --allow-non-unixfs to skip validation")
+		}
+		switch fsNode.Type() {
+		case ft.TDirectory:
+			// plain directories: safe, no link-count metadata to desync
+		case ft.THAMTShard:
+			return path.ImmutablePath{}, fmt.Errorf(
+				"cannot add links to a HAMTShard at the dag-pb level " +
+					"(would corrupt the HAMT bitfield); use 'ipfs files' " +
+					"commands instead, or pass --allow-non-unixfs to override")
+		default:
+			return path.ImmutablePath{}, fmt.Errorf(
+				"cannot add named links to a UnixFS %s node, "+
+					"only Directory nodes support link addition at the dag-pb level "+
+					"(see https://specs.ipfs.tech/unixfs/)",
+				fsNode.Type())
+		}
 	}
 
 	var createfunc func() *dag.ProtoNode
@@ -223,81 +97,87 @@ func (api *ObjectAPI) AddLink(ctx context.Context, base coreiface.Path, name str
 
 	err = e.InsertNodeAtPath(ctx, name, childNd, createfunc)
 	if err != nil {
-		return nil, err
+		return path.ImmutablePath{}, err
 	}
 
 	nnode, err := e.Finalize(ctx, api.dag)
 	if err != nil {
-		return nil, err
+		return path.ImmutablePath{}, err
 	}
 
-	return coreiface.IpfsPath(nnode.Cid()), nil
+	return path.FromCid(nnode.Cid()), nil
 }
 
-func (api *ObjectAPI) RmLink(ctx context.Context, base coreiface.Path, link string) (coreiface.ResolvedPath, error) {
+func (api *ObjectAPI) RmLink(ctx context.Context, base path.Path, link string, opts ...caopts.ObjectRmLinkOption) (path.ImmutablePath, error) {
+	ctx, span := tracing.Span(ctx, "CoreAPI.ObjectAPI", "RmLink", trace.WithAttributes(
+		attribute.String("base", base.String()),
+		attribute.String("link", link)),
+	)
+	defer span.End()
+
+	options, err := caopts.ObjectRmLinkOptions(opts...)
+	if err != nil {
+		return path.ImmutablePath{}, err
+	}
+
 	baseNd, err := api.core().ResolveNode(ctx, base)
 	if err != nil {
-		return nil, err
+		return path.ImmutablePath{}, err
 	}
 
 	basePb, ok := baseNd.(*dag.ProtoNode)
 	if !ok {
-		return nil, dag.ErrNotProtobuf
+		return path.ImmutablePath{}, dag.ErrNotProtobuf
+	}
+
+	// Same validation as AddLink: dagutils.Editor operates at the dag-pb
+	// level and cannot update UnixFS metadata (HAMT bitfields, Blocksizes).
+	if !options.SkipUnixFSValidation {
+		fsNode, err := ft.FSNodeFromBytes(basePb.Data())
+		if err != nil {
+			return path.ImmutablePath{}, fmt.Errorf(
+				"cannot remove links from a non-UnixFS dag-pb node; " +
+					"pass --allow-non-unixfs to skip validation")
+		}
+		switch fsNode.Type() {
+		case ft.TDirectory:
+			// plain directories: safe, no link-count metadata to desync
+		case ft.THAMTShard:
+			return path.ImmutablePath{}, fmt.Errorf(
+				"cannot remove links from a HAMTShard at the dag-pb level " +
+					"(would corrupt the HAMT bitfield); use 'ipfs files rm' " +
+					"instead, or pass --allow-non-unixfs to override")
+		default:
+			return path.ImmutablePath{}, fmt.Errorf(
+				"cannot remove links from a UnixFS %s node, "+
+					"only Directory nodes support link removal at the dag-pb level "+
+					"(see https://specs.ipfs.tech/unixfs/)",
+				fsNode.Type())
+		}
 	}
 
 	e := dagutils.NewDagEditor(basePb, api.dag)
 
 	err = e.RmLink(ctx, link)
 	if err != nil {
-		return nil, err
+		return path.ImmutablePath{}, err
 	}
 
 	nnode, err := e.Finalize(ctx, api.dag)
 	if err != nil {
-		return nil, err
+		return path.ImmutablePath{}, err
 	}
 
-	return coreiface.IpfsPath(nnode.Cid()), nil
+	return path.FromCid(nnode.Cid()), nil
 }
 
-func (api *ObjectAPI) AppendData(ctx context.Context, path coreiface.Path, r io.Reader) (coreiface.ResolvedPath, error) {
-	return api.patchData(ctx, path, r, true)
-}
+func (api *ObjectAPI) Diff(ctx context.Context, before path.Path, after path.Path) ([]coreiface.ObjectChange, error) {
+	ctx, span := tracing.Span(ctx, "CoreAPI.ObjectAPI", "Diff", trace.WithAttributes(
+		attribute.String("before", before.String()),
+		attribute.String("after", after.String()),
+	))
+	defer span.End()
 
-func (api *ObjectAPI) SetData(ctx context.Context, path coreiface.Path, r io.Reader) (coreiface.ResolvedPath, error) {
-	return api.patchData(ctx, path, r, false)
-}
-
-func (api *ObjectAPI) patchData(ctx context.Context, path coreiface.Path, r io.Reader, appendData bool) (coreiface.ResolvedPath, error) {
-	nd, err := api.core().ResolveNode(ctx, path)
-	if err != nil {
-		return nil, err
-	}
-
-	pbnd, ok := nd.(*dag.ProtoNode)
-	if !ok {
-		return nil, dag.ErrNotProtobuf
-	}
-
-	data, err := ioutil.ReadAll(r)
-	if err != nil {
-		return nil, err
-	}
-
-	if appendData {
-		data = append(pbnd.Data(), data...)
-	}
-	pbnd.SetData(data)
-
-	err = api.dag.Add(ctx, pbnd)
-	if err != nil {
-		return nil, err
-	}
-
-	return coreiface.IpfsPath(pbnd.Cid()), nil
-}
-
-func (api *ObjectAPI) Diff(ctx context.Context, before coreiface.Path, after coreiface.Path) ([]coreiface.ObjectChange, error) {
 	beforeNd, err := api.core().ResolveNode(ctx, before)
 	if err != nil {
 		return nil, err
@@ -316,16 +196,16 @@ func (api *ObjectAPI) Diff(ctx context.Context, before coreiface.Path, after cor
 	out := make([]coreiface.ObjectChange, len(changes))
 	for i, change := range changes {
 		out[i] = coreiface.ObjectChange{
-			Type: change.Type,
+			Type: coreiface.ChangeType(change.Type),
 			Path: change.Path,
 		}
 
 		if change.Before.Defined() {
-			out[i].Before = coreiface.IpfsPath(change.Before)
+			out[i].Before = path.FromCid(change.Before)
 		}
 
 		if change.After.Defined() {
-			out[i].After = coreiface.IpfsPath(change.After)
+			out[i].After = path.FromCid(change.After)
 		}
 	}
 
@@ -334,40 +214,4 @@ func (api *ObjectAPI) Diff(ctx context.Context, before coreiface.Path, after cor
 
 func (api *ObjectAPI) core() coreiface.CoreAPI {
 	return (*CoreAPI)(api)
-}
-
-func deserializeNode(nd *Node, dataFieldEncoding string) (*dag.ProtoNode, error) {
-	dagnode := new(dag.ProtoNode)
-	switch dataFieldEncoding {
-	case "text":
-		dagnode.SetData([]byte(nd.Data))
-	case "base64":
-		data, err := base64.StdEncoding.DecodeString(nd.Data)
-		if err != nil {
-			return nil, err
-		}
-		dagnode.SetData(data)
-	default:
-		return nil, fmt.Errorf("unkown data field encoding")
-	}
-
-	links := make([]*ipld.Link, len(nd.Links))
-	for i, link := range nd.Links {
-		c, err := cid.Decode(link.Hash)
-		if err != nil {
-			return nil, err
-		}
-		links[i] = &ipld.Link{
-			Name: link.Name,
-			Size: link.Size,
-			Cid:  c,
-		}
-	}
-	dagnode.SetLinks(links)
-
-	return dagnode, nil
-}
-
-func nodeEmpty(node *Node) bool {
-	return node.Data == "" && len(node.Links) == 0
 }

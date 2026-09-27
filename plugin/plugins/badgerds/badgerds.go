@@ -5,15 +5,18 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/ipfs/go-ipfs/plugin"
-	"github.com/ipfs/go-ipfs/repo"
-	"github.com/ipfs/go-ipfs/repo/fsrepo"
+	logging "github.com/ipfs/go-log/v2"
+	"github.com/ipfs/kubo/plugin"
+	"github.com/ipfs/kubo/repo"
+	"github.com/ipfs/kubo/repo/fsrepo"
 
-	humanize "gx/ipfs/QmPSBJL4momYnE7DcUyk2DVhD6rH488ZmHBGLbxNdhU44K/go-humanize"
-	badgerds "gx/ipfs/QmVoK2ivqzp5ZgWiEdBNFbKH7nzf9C4wPYr8cH7CGPMHtC/go-ds-badger"
+	humanize "github.com/dustin/go-humanize"
+	badgerds "github.com/ipfs/go-ds-badger"
 )
 
-// Plugins is exported list of plugins that will be loaded
+var log = logging.Logger("plugin/badgerds")
+
+// Plugins is exported list of plugins that will be loaded.
 var Plugins = []plugin.Plugin{
 	&badgerdsPlugin{},
 }
@@ -30,7 +33,7 @@ func (*badgerdsPlugin) Version() string {
 	return "0.1.0"
 }
 
-func (*badgerdsPlugin) Init() error {
+func (*badgerdsPlugin) Init(_ *plugin.Environment) error {
 	return nil
 }
 
@@ -47,9 +50,9 @@ type datastoreConfig struct {
 }
 
 // BadgerdsDatastoreConfig returns a configuration stub for a badger datastore
-// from the given parameters
+// from the given parameters.
 func (*badgerdsPlugin) DatastoreConfigParser() fsrepo.ConfigFromMap {
-	return func(params map[string]interface{}) (fsrepo.DatastoreConfig, error) {
+	return func(params map[string]any) (fsrepo.DatastoreConfig, error) {
 		var c datastoreConfig
 		var ok bool
 
@@ -60,7 +63,7 @@ func (*badgerdsPlugin) DatastoreConfigParser() fsrepo.ConfigFromMap {
 
 		sw, ok := params["syncWrites"]
 		if !ok {
-			c.syncWrites = true
+			c.syncWrites = false
 		} else {
 			if swb, ok := sw.(bool); ok {
 				c.syncWrites = swb
@@ -101,19 +104,45 @@ func (*badgerdsPlugin) DatastoreConfigParser() fsrepo.ConfigFromMap {
 }
 
 func (c *datastoreConfig) DiskSpec() fsrepo.DiskSpec {
-	return map[string]interface{}{
+	return map[string]any{
 		"type": "badgerds",
 		"path": c.path,
 	}
 }
 
 func (c *datastoreConfig) Create(path string) (repo.Datastore, error) {
+	log.Error("badger v1 datastore is deprecated and will be removed later in 2026, migrate to flatfs or experimental pebbleds: https://github.com/ipfs/kubo/issues/11186")
+	fmt.Fprintf(os.Stderr, `
+╔════════════════════════════════════════════════════════════════════════════╗
+║                                                                            ║
+║  ERROR: BADGER v1 DATASTORE IS DEPRECATED                                  ║
+║                                                                            ║
+║  This datastore is based on badger 1.x which has not been maintained       ║
+║  by its upstream maintainers for years and has known bugs (startup         ║
+║  timeouts, shutdown hangs, file descriptor exhaustion, and more).          ║
+║                                                                            ║
+║  Badger v1 support will be REMOVED later in 2026.                          ║
+║                                                                            ║
+║  To migrate:                                                               ║
+║    1. Create a new IPFS_PATH with flatfs (or experimental pebbleds         ║
+║       if flatfs does not serve your use case):                             ║
+║         export IPFS_PATH=/path/to/new/repo                                 ║
+║         ipfs init --profile=flatfs                                         ║
+║    2. Move pinned data via ipfs dag export/import                          ║
+║       or ipfs pin ls -t recursive|add                                      ║
+║    3. Decommission the old badger-based node                               ║
+║                                                                            ║
+║  See https://github.com/ipfs/kubo/blob/master/docs/datastores.md           ║
+║      https://github.com/ipfs/kubo/issues/11186                             ║
+║                                                                            ║
+╚════════════════════════════════════════════════════════════════════════════╝
+`)
 	p := c.path
 	if !filepath.IsAbs(p) {
 		p = filepath.Join(path, p)
 	}
 
-	err := os.MkdirAll(p, 0755)
+	err := os.MkdirAll(p, 0o755)
 	if err != nil {
 		return nil, err
 	}

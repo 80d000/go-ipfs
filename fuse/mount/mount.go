@@ -8,15 +8,14 @@ import (
 	"runtime"
 	"time"
 
-	goprocess "gx/ipfs/QmSF8fPo3jgVBAy8fpdjjYqgG87dkJgUprRBHRd2tmfgpP/goprocess"
-	logging "gx/ipfs/QmcuXC5cxs79ro2cUuHs4HQ2bkDLJUYokwL8aivcX6HW3C/go-log"
+	logging "github.com/ipfs/go-log/v2"
 )
 
 var log = logging.Logger("mount")
 
 var MountTimeout = time.Second * 5
 
-// Mount represents a filesystem mount
+// Mount represents a filesystem mount.
 type Mount interface {
 	// MountPoint is the path at which this mount is mounted
 	MountPoint() string
@@ -26,17 +25,13 @@ type Mount interface {
 
 	// Checks if the mount is still active.
 	IsActive() bool
-
-	// Process returns the mount's Process to be able to link it
-	// to other processes. Unmount upon closing.
-	Process() goprocess.Process
 }
 
 // ForceUnmount attempts to forcibly unmount a given mount.
 // It does so by calling diskutil or fusermount directly.
 func ForceUnmount(m Mount) error {
 	point := m.MountPoint()
-	log.Warningf("Force-Unmounting %s...", point)
+	log.Warnf("Force-Unmounting %s...", point)
 
 	cmd, err := UnmountCmd(point)
 	if err != nil {
@@ -65,12 +60,15 @@ func ForceUnmount(m Mount) error {
 }
 
 // UnmountCmd creates an exec.Cmd that is GOOS-specific
-// for unmount a FUSE mount
+// for unmount a FUSE mount.
 func UnmountCmd(point string) (*exec.Cmd, error) {
 	switch runtime.GOOS {
 	case "darwin":
 		return exec.Command("diskutil", "umount", "force", point), nil
 	case "linux":
+		if _, err := exec.LookPath("fusermount3"); err == nil {
+			return exec.Command("fusermount3", "-u", point), nil
+		}
 		return exec.Command("fusermount", "-u", point), nil
 	default:
 		return nil, fmt.Errorf("unmount: unimplemented")
@@ -82,7 +80,7 @@ func UnmountCmd(point string) (*exec.Cmd, error) {
 // Attempts a given number of times.
 func ForceUnmountManyTimes(m Mount, attempts int) error {
 	var err error
-	for i := 0; i < attempts; i++ {
+	for range attempts {
 		err = ForceUnmount(m)
 		if err == nil {
 			return err
@@ -98,7 +96,7 @@ type closer struct {
 }
 
 func (c *closer) Close() error {
-	log.Warning(" (c *closer) Close(),", c.M.MountPoint())
+	log.Warn(" (c *closer) Close(),", c.M.MountPoint())
 	return c.M.Unmount()
 }
 

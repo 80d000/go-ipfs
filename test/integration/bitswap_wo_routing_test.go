@@ -2,31 +2,29 @@ package integrationtest
 
 import (
 	"bytes"
-	"context"
 	"testing"
 
-	"github.com/ipfs/go-ipfs/core"
-	"github.com/ipfs/go-ipfs/core/mock"
-	"gx/ipfs/QmWoXtvgC8inqFkAATB7cp2Dax7XBi9VDvSg9RCCZufmRk/go-block-format"
-
-	cid "gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
-	mocknet "gx/ipfs/QmSgtf5vHyugoxcwMbyNy6bZ9qPDDTJSYEED2GkWjLwitZ/go-libp2p/p2p/net/mock"
+	blocks "github.com/ipfs/go-block-format"
+	"github.com/ipfs/go-cid"
+	"github.com/ipfs/kubo/core"
+	coremock "github.com/ipfs/kubo/core/mock"
+	"github.com/ipfs/kubo/core/node/libp2p"
+	mocknet "github.com/libp2p/go-libp2p/p2p/net/mock"
 )
 
 func TestBitswapWithoutRouting(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	const numPeers = 4
 
 	// create network
-	mn := mocknet.New(ctx)
+	mn := mocknet.New()
 
 	var nodes []*core.IpfsNode
-	for i := 0; i < numPeers; i++ {
+	for range numPeers {
 		n, err := core.NewNode(ctx, &core.BuildCfg{
 			Online:  true,
 			Host:    coremock.MockHostOption(mn),
-			Routing: core.NilRouterOption, // no routing
+			Routing: libp2p.NilRouterOption, // no routing
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -35,7 +33,10 @@ func TestBitswapWithoutRouting(t *testing.T) {
 		nodes = append(nodes, n)
 	}
 
-	mn.LinkAll()
+	err := mn.LinkAll()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// connect them
 	for _, n1 := range nodes {
@@ -58,7 +59,7 @@ func TestBitswapWithoutRouting(t *testing.T) {
 	block1 := blocks.NewBlock([]byte("block1"))
 
 	// put 1 before
-	if err := nodes[0].Blockstore.Put(block0); err != nil {
+	if err := nodes[0].Blockstore.Put(ctx, block0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -81,7 +82,7 @@ func TestBitswapWithoutRouting(t *testing.T) {
 	}
 
 	// put 1 after
-	if err := nodes[1].Blockstore.Put(block1); err != nil {
+	if err := nodes[1].Blockstore.Put(ctx, block1); err != nil {
 		t.Fatal(err)
 	}
 

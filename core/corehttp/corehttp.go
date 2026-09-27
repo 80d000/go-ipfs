@@ -11,12 +11,10 @@ import (
 	"net/http"
 	"time"
 
-	core "github.com/ipfs/go-ipfs/core"
-	ma "gx/ipfs/QmNTCey11oxhb1AxDnQBRHtdhap6Ctud872NjAYPYYXPuc/go-multiaddr"
-	"gx/ipfs/QmSF8fPo3jgVBAy8fpdjjYqgG87dkJgUprRBHRd2tmfgpP/goprocess"
-	periodicproc "gx/ipfs/QmSF8fPo3jgVBAy8fpdjjYqgG87dkJgUprRBHRd2tmfgpP/goprocess/periodic"
-	manet "gx/ipfs/QmZcLBXKaFe8ND5YHPkJRAwmhJGrVsi1JqDZNyJ4nRK5Mj/go-multiaddr-net"
-	logging "gx/ipfs/QmcuXC5cxs79ro2cUuHs4HQ2bkDLJUYokwL8aivcX6HW3C/go-log"
+	logging "github.com/ipfs/go-log/v2"
+	core "github.com/ipfs/kubo/core"
+	ma "github.com/multiformats/go-multiaddr"
+	manet "github.com/multiformats/go-multiaddr/net"
 )
 
 var log = logging.Logger("core/server")
@@ -31,9 +29,9 @@ const shutdownTimeout = 30 * time.Second
 // initially passed in if not.
 type ServeOption func(*core.IpfsNode, net.Listener, *http.ServeMux) (*http.ServeMux, error)
 
-// makeHandler turns a list of ServeOptions into a http.Handler that implements
+// MakeHandler turns a list of ServeOptions into a http.Handler that implements
 // all of the given options, in order.
-func makeHandler(n *core.IpfsNode, l net.Listener, options ...ServeOption) (http.Handler, error) {
+func MakeHandler(n *core.IpfsNode, l net.Listener, options ...ServeOption) (http.Handler, error) {
 	topMux := http.NewServeMux()
 	mux := topMux
 	for _, option := range options {
@@ -43,7 +41,17 @@ func makeHandler(n *core.IpfsNode, l net.Listener, options ...ServeOption) (http
 			return nil, err
 		}
 	}
-	return topMux, nil
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// ServeMux does not support requests with CONNECT method,
+		// so we need to handle them separately
+		// https://golang.org/src/net/http/request.go#L111
+		if r.Method == http.MethodConnect {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		topMux.ServeHTTP(w, r)
+	})
+	return handler, nil
 }
 
 // ListenAndServe runs an HTTP server listening at |listeningMultiAddr| with
@@ -63,18 +71,34 @@ func ListenAndServe(n *core.IpfsNode, listeningMultiAddr string, options ...Serv
 		return err
 	}
 
-	// we might have listened to /tcp/0 - lets see what we are listing on
+	// we might have listened to /tcp/0 - let's see what we are listing on
 	addr = list.Multiaddr()
-	fmt.Printf("API server listening on %s\n", addr)
+	fmt.Printf("RPC API server listening on %s\n", addr)
 
 	return Serve(n, manet.NetListener(list), options...)
 }
 
+// Serve accepts incoming HTTP connections on the listener and passes them
+// to ServeOption handlers.
 func Serve(node *core.IpfsNode, lis net.Listener, options ...ServeOption) error {
+	return ServeWithReady(node, lis, nil, options...)
+}
+
+// ServeWithReady is like Serve but signals on the ready channel when the
+// server is about to accept connections. The channel is closed right before
+// server.Serve() is called.
+//
+// This is useful for callers that need to perform actions (like writing
+// address files) only after the server is guaranteed to be accepting
+// connections, avoiding race conditions where clients see the file before
+// the server is ready.
+//
+// Passing nil for ready is equivalent to calling Serve().
+func ServeWithReady(node *core.IpfsNode, lis net.Listener, ready chan<- struct{}, options ...ServeOption) error {
 	// make sure we close this no matter what.
 	defer lis.Close()
 
-	handler, err := makeHandler(node, lis, options...)
+	handler, err := MakeHandler(node, lis, options...)
 	if err != nil {
 		return err
 	}
@@ -85,7 +109,7 @@ func Serve(node *core.IpfsNode, lis net.Listener, options ...ServeOption) error 
 	}
 
 	select {
-	case <-node.Process().Closing():
+	case <-node.Context().Done():
 		return fmt.Errorf("failed to start server, process closing")
 	default:
 	}
@@ -95,20 +119,34 @@ func Serve(node *core.IpfsNode, lis net.Listener, options ...ServeOption) error 
 	}
 
 	var serverError error
-	serverProc := node.Process().Go(func(p goprocess.Process) {
+	serverClosed := make(chan struct{})
+	go func() {
+		if ready != nil {
+			close(ready)
+		}
 		serverError = server.Serve(lis)
-	})
+		close(serverClosed)
+	}()
 
 	// wait for server to exit.
 	select {
-	case <-serverProc.Closed():
+	case <-serverClosed:
 	// if node being closed before server exits, close server
-	case <-node.Process().Closing():
+	case <-node.Context().Done():
 		log.Infof("server at %s terminating...", addr)
 
-		warnProc := periodicproc.Tick(5*time.Second, func(_ goprocess.Process) {
-			log.Infof("waiting for server at %s to terminate...", addr)
-		})
+		go func() {
+			ticker := time.NewTicker(5 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					log.Infof("waiting for server at %s to terminate...", addr)
+				case <-serverClosed:
+					return
+				}
+			}
+		}()
 
 		// This timeout shouldn't be necessary if all of our commands
 		// are obeying their contexts but we should have *some* timeout.
@@ -118,10 +156,8 @@ func Serve(node *core.IpfsNode, lis net.Listener, options ...ServeOption) error 
 
 		// Should have already closed but we still need to wait for it
 		// to set the error.
-		<-serverProc.Closed()
+		<-serverClosed
 		serverError = err
-
-		warnProc.Close()
 	}
 
 	log.Infof("server at %s terminated", addr)

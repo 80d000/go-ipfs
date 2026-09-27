@@ -7,7 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	version "github.com/ipfs/go-ipfs"
+	version "github.com/ipfs/kubo"
 )
 
 type testcasecheckversion struct {
@@ -37,7 +37,7 @@ func TestCheckVersionOption(t *testing.T) {
 
 	for _, tc := range tcs {
 		t.Logf("%#v", tc)
-		r := httptest.NewRequest("POST", tc.uri, nil)
+		r := httptest.NewRequest(http.MethodPost, tc.uri, nil)
 		r.Header.Add("User-Agent", tc.userAgent) // old version, should fail
 
 		called := false
@@ -51,8 +51,9 @@ func TestCheckVersionOption(t *testing.T) {
 			called = true
 			if !tc.shouldHandle {
 				t.Error("handler was called even though version didn't match")
-			} else {
-				io.WriteString(w, "check!")
+			}
+			if _, err := io.WriteString(w, "check!"); err != nil {
+				t.Error(err)
 			}
 		})
 

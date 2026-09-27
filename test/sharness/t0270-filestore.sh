@@ -13,7 +13,7 @@ test_expect_success "create a dataset" '
   random-files -seed=483 -depth=3 -dirs=4 -files=6 -filesize=1000000 somedir > /dev/null
 '
 
-EXPHASH="QmW4JLyeTxEWGwa4mkE9mHzdtAkyhMX2ToGFEKZNjCiJud"
+EXPHASH="QmVgyYJehnfssTZuUqemyegiZmLiuNcxBWGGxBYaN2VD4x"
 
 get_repo_size() {
   disk_usage "$IPFS_PATH"
@@ -24,7 +24,7 @@ assert_repo_size_less_than() {
 
   test_expect_success "check repo size" '
     test "$(get_repo_size)"  -lt "$expval" ||
-      { echo should be bellow "$expval" && test_fsh get_repo_size; }
+      { echo should be below "$expval" && test_fsh get_repo_size; }
   '
 }
 
@@ -39,7 +39,7 @@ assert_repo_size_greater_than() {
 
 test_filestore_adds() {
   test_expect_success "nocopy add succeeds" '
-    HASH=$(ipfs add --raw-leaves --nocopy -r -q somedir | tail -n1)
+    HASH=$(ipfs add --raw-leaves --nocopy -r -Q somedir)
   '
 
   test_expect_success "nocopy add has right hash" '
@@ -48,7 +48,7 @@ test_filestore_adds() {
 
   assert_repo_size_less_than 1000000
 
-  test_expect_success "normal add with fscache doesnt duplicate data" '
+  test_expect_success "normal add with fscache doesn't duplicate data" '
     ipfs add --raw-leaves --fscache -r -q somedir > /dev/null
   '
 
@@ -63,18 +63,33 @@ test_filestore_adds() {
 
 init_ipfs_filestore() {
   test_expect_success "clean up old node" '
-    rm -rf "$IPFS_PATH" mountdir ipfs ipns
+    rm -rf "$IPFS_PATH" mountdir ipfs ipns mfs
   '
 
   test_init_ipfs
 
+  # Check the _early_ error message
   test_expect_success "nocopy add errors and has right message" '
+    test_must_fail ipfs add --nocopy -r somedir 2> add_out &&
+      grep "either the filestore or the urlstore must be enabled" add_out
+  '
+
+  assert_repo_size_less_than 1000000
+
+  test_expect_success "enable urlstore config setting" '
+    ipfs config --json Experimental.UrlstoreEnabled true
+  '
+
+  # Check the _late_ error message
+  test_expect_success "nocopy add errors and has right message when the urlstore is enabled" '
     test_must_fail ipfs add --nocopy -r somedir 2> add_out &&
       grep "filestore is not enabled" add_out
   '
 
+  assert_repo_size_less_than 1000000
 
   test_expect_success "enable filestore config setting" '
+    ipfs config --json Experimental.UrlstoreEnabled true &&
     ipfs config --json Experimental.FilestoreEnabled true
   '
 }

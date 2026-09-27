@@ -1,30 +1,28 @@
 package commands
 
 import (
-	"context"
 	"fmt"
 	"testing"
 
-	cmds "gx/ipfs/QmR77mMvvh8mJBBWQmBfQBu8oD38NUN4KE9SL2gDgAQNc6/go-ipfs-cmds"
-	cmdkit "gx/ipfs/Qmde5VP1qUkyQXKCfmEUA7bP64V2HAptbJ7phuPp7jXWwg/go-ipfs-cmdkit"
+	cmds "github.com/ipfs/go-ipfs-cmds"
 )
 
 func TestGetOutputPath(t *testing.T) {
 	cases := []struct {
 		args    []string
-		opts    cmdkit.OptMap
+		opts    cmds.OptMap
 		outPath string
 	}{
 		{
 			args: []string{"/ipns/multiformats.io/"},
-			opts: map[string]interface{}{
+			opts: map[string]any{
 				"output": "takes-precedence",
 			},
 			outPath: "takes-precedence",
 		},
 		{
 			args: []string{"/ipns/multiformats.io/", "some-other-arg-to-be-ignored"},
-			opts: cmdkit.OptMap{
+			opts: cmds.OptMap{
 				"output": "takes-precedence",
 			},
 			outPath: "takes-precedence",
@@ -32,17 +30,17 @@ func TestGetOutputPath(t *testing.T) {
 		{
 			args:    []string{"/ipns/multiformats.io/"},
 			outPath: "multiformats.io",
-			opts:    cmdkit.OptMap{},
+			opts:    cmds.OptMap{},
 		},
 		{
 			args:    []string{"/ipns/multiformats.io/logo.svg/"},
 			outPath: "logo.svg",
-			opts:    cmdkit.OptMap{},
+			opts:    cmds.OptMap{},
 		},
 		{
 			args:    []string{"/ipns/multiformats.io", "some-other-arg-to-be-ignored"},
 			outPath: "multiformats.io",
-			opts:    cmdkit.OptMap{},
+			opts:    cmds.OptMap{},
 		},
 	}
 
@@ -53,8 +51,7 @@ func TestGetOutputPath(t *testing.T) {
 
 	for i, tc := range cases {
 		t.Run(fmt.Sprintf("%s-%d", t.Name(), i), func(t *testing.T) {
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
+			ctx := t.Context()
 
 			req, err := cmds.NewRequest(ctx, []string{}, tc.opts, tc.args, nil, GetCmd)
 			if err != nil {

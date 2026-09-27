@@ -6,14 +6,13 @@ import (
 	"errors"
 	"time"
 
-	"github.com/ipfs/go-ipfs/core"
-	gc "github.com/ipfs/go-ipfs/pin/gc"
-	repo "github.com/ipfs/go-ipfs/repo"
+	"github.com/ipfs/kubo/core"
+	"github.com/ipfs/kubo/gc"
+	"github.com/ipfs/kubo/repo"
 
-	humanize "gx/ipfs/QmPSBJL4momYnE7DcUyk2DVhD6rH488ZmHBGLbxNdhU44K/go-humanize"
-	cid "gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
-	mfs "gx/ipfs/QmVBXaQqupXCFtS62xtr9EsKGkbK9LviqCKSzwcqzwvX9U/go-mfs"
-	logging "gx/ipfs/QmcuXC5cxs79ro2cUuHs4HQ2bkDLJUYokwL8aivcX6HW3C/go-log"
+	"github.com/dustin/go-humanize"
+	"github.com/ipfs/go-cid"
+	logging "github.com/ipfs/go-log/v2"
 )
 
 var log = logging.Logger("corerepo")
@@ -40,11 +39,15 @@ func NewGC(n *core.IpfsNode) (*GC, error) {
 	// TODO: there should be a general check for all of the cfg fields
 	// maybe distinguish between user config file and default struct?
 	if cfg.Datastore.StorageMax == "" {
-		r.SetConfigKey("Datastore.StorageMax", "10GB")
+		if err := r.SetConfigKey("Datastore.StorageMax", "10GB"); err != nil {
+			return nil, err
+		}
 		cfg.Datastore.StorageMax = "10GB"
 	}
 	if cfg.Datastore.StorageGCWatermark == 0 {
-		r.SetConfigKey("Datastore.StorageGCWatermark", 90)
+		if err := r.SetConfigKey("Datastore.StorageGCWatermark", 90); err != nil {
+			return nil, err
+		}
 		cfg.Datastore.StorageGCWatermark = 90
 	}
 
@@ -56,10 +59,7 @@ func NewGC(n *core.IpfsNode) (*GC, error) {
 
 	// calculate the slack space between StorageMax and StorageGCWatermark
 	// used to limit GC duration
-	slackGB := (storageMax - storageGC) / 10e9
-	if slackGB < 1 {
-		slackGB = 1
-	}
+	slackGB := max((storageMax-storageGC)/10e9, 1)
 
 	return &GC{
 		Node:       n,
@@ -70,23 +70,38 @@ func NewGC(n *core.IpfsNode) (*GC, error) {
 	}, nil
 }
 
-func BestEffortRoots(filesRoot *mfs.Root) ([]cid.Cid, error) {
-	rootDag, err := filesRoot.GetDirectory().GetNode()
+// BestEffortRoots returns the CIDs of the live MFS roots GC must keep: the
+// node's FilesRoot plus any extra roots registered via
+// IpfsNode.RegisterMFSRoot (for example the per-key roots of a writable /ipns
+// FUSE mount). Extra roots are walked best-effort: one that cannot be read
+// (e.g. because its mount is unmounting) is logged and skipped rather than
+// failing the whole GC. FilesRoot is required.
+func BestEffortRoots(n *core.IpfsNode) ([]cid.Cid, error) {
+	rootDag, err := n.FilesRoot.GetDirectory().GetNode()
 	if err != nil {
 		return nil, err
 	}
+	roots := []cid.Cid{rootDag.Cid()}
 
-	return []cid.Cid{rootDag.Cid()}, nil
+	for _, r := range n.MFSRoots() {
+		if r == nil {
+			continue
+		}
+		nd, err := r.GetDirectory().GetNode()
+		if err != nil {
+			log.Warnf("gc: skipping unreadable MFS root (mount unmounting?): %s", err)
+			continue
+		}
+		roots = append(roots, nd.Cid())
+	}
+
+	return roots, nil
 }
 
 func GarbageCollect(n *core.IpfsNode, ctx context.Context) error {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel() // in case error occurs during operation
-	roots, err := BestEffortRoots(n.FilesRoot)
-	if err != nil {
-		return err
-	}
-	rmed := gc.GC(ctx, n.Blockstore, n.Repo.Datastore(), n.Pinning, roots)
+	rmed := gc.GC(ctx, n.Blockstore, n.Repo.Datastore(), n.Pinning, func(context.Context) ([]cid.Cid, error) {
+		return BestEffortRoots(n)
+	})
 
 	return CollectResult(ctx, rmed, nil)
 }
@@ -146,15 +161,9 @@ func (e *MultiError) Error() string {
 }
 
 func GarbageCollectAsync(n *core.IpfsNode, ctx context.Context) <-chan gc.Result {
-	roots, err := BestEffortRoots(n.FilesRoot)
-	if err != nil {
-		out := make(chan gc.Result)
-		out <- gc.Result{Error: err}
-		close(out)
-		return out
-	}
-
-	return gc.GC(ctx, n.Blockstore, n.Repo.Datastore(), n.Pinning, roots)
+	return gc.GC(ctx, n.Blockstore, n.Repo.Datastore(), n.Pinning, func(context.Context) ([]cid.Cid, error) {
+		return BestEffortRoots(n)
+	})
 }
 
 func PeriodicGC(ctx context.Context, node *core.IpfsNode) error {
@@ -203,19 +212,18 @@ func ConditionalGC(ctx context.Context, node *core.IpfsNode, offset uint64) erro
 }
 
 func (gc *GC) maybeGC(ctx context.Context, offset uint64) error {
-	storage, err := gc.Repo.GetStorageUsage()
+	storage, err := gc.Repo.GetStorageUsage(ctx)
 	if err != nil {
 		return err
 	}
 
 	if storage+offset > gc.StorageGC {
 		if storage+offset > gc.StorageMax {
-			log.Warningf("pre-GC: %s", ErrMaxStorageExceeded)
+			log.Warnf("pre-GC: %s", ErrMaxStorageExceeded)
 		}
 
 		// Do GC here
 		log.Info("Watermark exceeded. Starting repo GC...")
-		defer log.EventBegin(ctx, "repoGC").Done()
 
 		if err := GarbageCollect(gc.Node, ctx); err != nil {
 			return err

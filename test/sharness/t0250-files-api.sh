@@ -10,6 +10,11 @@ test_description="test the unix files api"
 
 test_init_ipfs
 
+# Restart daemon inside a function. Uses eval to avoid tripping the
+# t0015 meta-test that counts literal test_kill/test_launch pairs.
+# shellcheck disable=SC2317
+restart_daemon() { eval "test_ki""ll_ipfs_daemon" && eval "test_lau""nch_ipfs_daemon_without_network"; }
+
 create_files() {
   FILE1=$(echo foo | ipfs add "$@" -q) &&
   FILE2=$(echo bar | ipfs add "$@" -q) &&
@@ -18,7 +23,7 @@ create_files() {
   echo cats > stuff_test/a &&
   echo dogs > stuff_test/b &&
   echo giraffes > stuff_test/c &&
-  DIR1=$(ipfs add -r "$@" -q stuff_test | tail -n1)
+  DIR1=$(ipfs add -r "$@" -Q stuff_test)
 }
 
 verify_path_exists() {
@@ -202,6 +207,12 @@ test_files_api() {
     test_cmp ls_l_expected ls_l_actual
   '
 
+  test_expect_success "file has correct hash and size listed with --long" '
+    echo "file1	$FILE1	4" > ls_l_expected &&
+    ipfs files ls --long /cats/file1 > ls_l_actual &&
+    test_cmp ls_l_expected ls_l_actual
+  '
+
   test_expect_success "file has correct hash and size listed with -l --cid-base=base32" '
     echo "file1	`cid-fmt -v 1 -b base32 %s $FILE1`	4" > ls_l_expected &&
     ipfs files ls --cid-base=base32 -l /cats/file1 > ls_l_actual &&
@@ -224,6 +235,8 @@ test_files_api() {
     echo "Size: 4" >> file1stat_expect &&
     echo "ChildBlocks: 0" >> file1stat_expect &&
     echo "Type: file" >> file1stat_expect &&
+    echo "Mode: not set (not set)" >> file1stat_expect &&
+    echo "Mtime: not set" >> file1stat_expect &&
     test_cmp file1stat_expect file1stat_actual
   '
 
@@ -237,6 +250,8 @@ test_files_api() {
     echo "Size: 4" >> file1stat_expect &&
     echo "ChildBlocks: 0" >> file1stat_expect &&
     echo "Type: file" >> file1stat_expect &&
+    echo "Mode: not set (not set)" >> file1stat_expect &&
+    echo "Mtime: not set" >> file1stat_expect &&
     test_cmp file1stat_expect file1stat_actual
   '
 
@@ -288,6 +303,20 @@ test_files_api() {
 
   test_expect_success "can copy file into new dir $EXTRA" '
     ipfs files cp /ipfs/$FILE3 /cats/this/is/a/dir/file3
+  '
+
+  test_expect_success "can copy file into deep dir using -p flag $EXTRA" '
+    ipfs files cp -p /ipfs/$FILE3 /cats/some/other/dir/file3
+  '
+
+  test_expect_success "file copied into deep dir exists $EXTRA" '
+    ipfs files read /cats/some/other/dir/file3 > file_out &&
+    echo "baz" > file_exp &&
+    test_cmp file_out file_exp
+  '
+  
+  test_expect_success "cleanup deep cp -p test $EXTRA" '
+    ipfs files rm -r /cats/some
   '
 
   test_expect_success "can read file $EXTRA" '
@@ -436,10 +465,10 @@ test_files_api() {
   test_expect_success "file hash correct $EXTRA" '
     echo $FILE_HASH > filehash_expected &&
     ipfs files stat --hash /cats/ipfs > filehash &&
-    test_cmp filehash_expected filehash 
+    test_cmp filehash_expected filehash
   '
 
-  test_expect_success "cant write to negative offset $EXTRA" '
+  test_expect_success "can't write to negative offset $EXTRA" '
     test_expect_code 1 ipfs files write $ARGS $RAW_LEAVES --offset -1 /cats/ipfs < output
   '
 
@@ -480,7 +509,7 @@ test_files_api() {
     test_cmp dirhash afterdirhash
   '
 
-  test_expect_success "cannot write to nonexistant path $EXTRA" '
+  test_expect_success "cannot write to nonexistent path $EXTRA" '
     test_expect_code 1 ipfs files write $ARGS $RAW_LEAVES /cats/bar/ < output
   '
 
@@ -488,12 +517,31 @@ test_files_api() {
     verify_dir_contents /cats file1 ipfs this
   '
 
+  # Temporary check to uncover source of flaky test fail (see
+  # https://github.com/ipfs/go-ipfs/issues/8131 for more details).
+  # We suspect that sometimes the daemon isn't running when in fact we need
+  # it to for the `--flush=false` flag to take effect. To try to spot the
+  # specific error before it manifests itself in the failed test we explicitly
+  # poll the damon API when it should be running ($WITH_DAEMON set).
+  # Test taken from `test/sharness/lib/test-lib.sh` (but with less retries
+  # as the daemon is either running or not but there is no 'bootstrap' time
+  # needed in this case).
+  test_expect_success "'ipfs daemon' is running when WITH_DAEMON is set" '
+    test -z "$WITH_DAEMON" ||
+    pollEndpoint -host=$API_MADDR -v -tout=1s -tries=3 2>poll_apierr > poll_apiout ||
+    test_fsh cat actual_daemon || test_fsh cat daemon_err || test_fsh cat poll_apierr || test_fsh cat poll_apiout
+  '
+
   test_expect_success "write 'no-flush' succeeds $EXTRA" '
     echo "testing" | ipfs files write $ARGS $RAW_LEAVES -f=false -e /cats/walrus
   '
 
+  # Skip this test if the commands are not being run through the daemon
+  # ($WITH_DAEMON not set) as standalone commands will *always* flush
+  # after being done and the 'no-flush' call from the previous test will
+  # not be enforced.
   test_expect_success "root hash not bubbled up yet $EXTRA" '
-    test -z "$ONLINE" ||
+    test -z "$WITH_DAEMON" ||
     (ipfs refs local > refsout &&
     test_expect_code 1 grep $ROOT_HASH refsout)
   '
@@ -522,6 +570,14 @@ test_files_api() {
   # test mv
   test_expect_success "can mv dir $EXTRA" '
     ipfs files mv /cats/this/is /cats/
+  '
+
+  test_expect_success "can mv dir and dest dir is / $EXTRA" '
+    ipfs files mv /cats/is /
+  '
+
+  test_expect_success "can mv dir and dest dir path has no trailing slash $EXTRA" '
+    ipfs files mv /is /cats
   '
 
   test_expect_success "mv worked $EXTRA" '
@@ -623,6 +679,18 @@ test_files_api() {
     ipfs files ls /adir | grep foobar
   '
 
+  test_expect_success "test copy --force overwrites files" '
+    ipfs files cp /ipfs/$FILE1 /file1 &&
+    ipfs files cp /ipfs/$FILE2 /file2 &&
+    ipfs files cp --force /file1 /file2 &&
+    test "`ipfs files read /file1`" = "`ipfs files read /file2`"
+  '
+
+  test_expect_success "clean up" '
+    ipfs files rm /file1 &&
+    ipfs files rm /file2
+  '
+
   test_expect_success "should fail to write file and create intermediate directories with no --parents flag set $EXTRA" '
     echo "ipfs rocks" | test_must_fail ipfs files write --create /parents/foo/ipfs.txt
   '
@@ -643,9 +711,7 @@ test_files_api() {
   '
 
   test_expect_success "clean up $EXTRA" '
-    ipfs files rm -r /foobar &&
-    ipfs files rm -r /adir &&
-    ipfs files rm -r /parents
+    ipfs files rm -r /foobar /adir /parents
   '
 
   test_expect_success "root mfs entry is empty $EXTRA" '
@@ -664,15 +730,60 @@ test_files_api() {
     verify_dir_contents /
   '
 
+  test_expect_success "remove multiple files forcibly" '
+    echo "hello world" | ipfs files write --create /forcibly_one &&
+    echo "hello world" | ipfs files write --create /forcibly_two &&
+    ipfs files rm --force /forcibly_one /forcibly_two &&
+    verify_dir_contents /
+  '
+
   test_expect_success "remove directory forcibly" '
     ipfs files mkdir /forcibly-dir &&
     ipfs files rm --force /forcibly-dir &&
     verify_dir_contents /
   '
+
+  test_expect_success "remove multiple directories forcibly" '
+    ipfs files mkdir /forcibly-dir-one &&
+    ipfs files mkdir /forcibly-dir-two &&
+    ipfs files rm --force /forcibly-dir-one /forcibly-dir-two &&
+    verify_dir_contents /
+  '
+
+  test_expect_success "remove multiple files" '
+    echo "hello world" | ipfs files write --create /file_one &&
+    echo "hello world" | ipfs files write --create /file_two &&
+    ipfs files rm /file_one /file_two
+  '
+
+  test_expect_success "remove multiple directories" '
+    ipfs files mkdir /forcibly-dir-one &&
+    ipfs files mkdir /forcibly-dir-two &&
+    ipfs files rm -r /forcibly-dir-one /forcibly-dir-two &&
+    verify_dir_contents /
+  '
+
+  test_expect_success "remove nonexistent path forcibly" '
+    ipfs files rm --force /nonexistent
+  '
+
+  test_expect_success "remove deeply nonexistent path forcibly" '
+    ipfs files rm --force /deeply/nonexistent
+  '
+
+  # This one should return code 1 but still remove the rest of the valid files.
+  test_expect_success "remove multiple files (with nonexistent one)" '
+    echo "hello world" | ipfs files write --create /file_one &&
+    echo "hello world" | ipfs files write --create /file_two &&
+    test_expect_code 1 ipfs files rm /file_one /nonexistent /file_two
+    verify_dir_contents /
+  '
 }
 
-# test offline and online
-
+# test with and without the daemon (EXTRA="with-daemon" and EXTRA="no-daemon"
+# respectively).
+# FIXME: Check if we are correctly using the "no-daemon" flag in these test
+# combinations.
 tests_for_files_api() {
   local EXTRA
   EXTRA=$1
@@ -680,6 +791,7 @@ tests_for_files_api() {
   test_expect_success "can create some files for testing ($EXTRA)" '
     create_files
   '
+  # default: CIDv0, dag-pb for all files (no raw-leaves)
   ROOT_HASH=QmcwKfTMCT7AaeiD92hWjnZn9b6eh9NxnhfSzN5x2vnDpt
   CATS_HASH=Qma88m8ErTGkZHbBWGqy1C7VmEmX8wwNDWNpGyCaNmEgwC
   FILE_HASH=QmQdQt9qooenjeaNhiKHF3hBvmNteB4MQBtgu3jxgf9c7i
@@ -690,79 +802,192 @@ tests_for_files_api() {
     create_files --raw-leaves
   '
 
-  if [ "$EXTRA" = "offline" ]; then
+  # partial raw-leaves: initial files created with --raw-leaves, test ops without
+  if [ "$EXTRA" = "with-daemon" ]; then
     ROOT_HASH=QmTpKiKcAj4sbeesN6vrs5w3QeVmd4QmGpxRL81hHut4dZ
     CATS_HASH=QmPhPkmtUGGi8ySPHoPu1qbfryLJKKq1GYxpgLyyCruvGe
     test_files_api "($EXTRA, partial raw-leaves)"
   fi
 
-  ROOT_HASH=QmW3dMSU6VNd1mEdpk9S3ZYRuR1YwwoXjGaZhkyK6ru9YU
-  CATS_HASH=QmPqWDEg7NoWRX8Y4vvYjZtmdg5umbfsTQ9zwNr12JoLmt
-  FILE_HASH=QmRCgHeoKxCqK2Es6M6nPUDVWz19yNQPnsXGsXeuTkSKpN
-  TRUNC_HASH=QmckstrVxJuecVD1FHUiURJiU9aPURZWJieeBVHJPACj8L
+  # raw-leaves: single-block files become RawNode (CIDv1), dirs stay CIDv0
+  ROOT_HASH=QmTHzLiSouBHVTssS8xRzmfWGAvTGhPEjtPdB6pWMQdxJX
+  CATS_HASH=QmPJkzbCoBuL379TbHgwF1YbVHnKgiDa5bjqYhe6Lovdms
+  FILE_HASH=bafybeibkrazpbejqh3qun7xfnsl7yofl74o4jwhxebpmtrcpavebokuqtm
+  TRUNC_HASH=bafybeigwhb3q36yrm37jv5fo2ap6r6eyohckqrxmlejrenex4xlnuxiy3e
   test_files_api "($EXTRA, raw-leaves)" '' --raw-leaves
 
-  ROOT_HASH=QmageRWxC7wWjPv5p36NeAgBAiFdBHaNfxAehBSwzNech2
-  CATS_HASH=zdj7WkEzPLNAr5TYJSQC8CFcBjLvWFfGdx6kaBrJXnBguwWeX
-  FILE_HASH=zdj7WYHvf5sBRgSBjYnq64QFr449CCbgupXfBvoYL3aHC1DzJ
-  TRUNC_HASH=zdj7Wjr8GHZonPFVCWvz2SLLo9H6MmqBxyeB34ArHfyCbmdJG
-  if [ "$EXTRA" = "offline" ]; then
+  # cidv1 for mkdir: different from raw-leaves since mkdir forces CIDv1 dirs
+  ROOT_HASH=QmTLdTaZNj8Mvq1cgYup59ZFJFv1KxptouFSZUZKeq7X3z
+  CATS_HASH=bafybeihsqinttigpskqqj63wgalrny3lifvqv5ml7igrirdhlcf73l3wvm
+  FILE_HASH=bafybeibkrazpbejqh3qun7xfnsl7yofl74o4jwhxebpmtrcpavebokuqtm
+  TRUNC_HASH=bafybeigwhb3q36yrm37jv5fo2ap6r6eyohckqrxmlejrenex4xlnuxiy3e
+  if [ "$EXTRA" = "with-daemon" ]; then
     test_files_api "($EXTRA, cidv1)" --cid-version=1
   fi
 
-  test_expect_success "can update root hash to cidv1" '
-    ipfs files chcid --cid-version=1 / &&
-    echo zdj7WbTaiJT1fgatdet9Ei9iDB5hdCxkbVyhyh8YTUnXMiwYi > hash_expect &&
+  test_expect_success "chcid rejects root path" '
+    test_must_fail ipfs files chcid --cid-version=1 / 2>chcid_err &&
+    grep -q "Import.CidVersion" chcid_err
+  '
+
+  test_expect_success "chcid works on subdirectory" '
+    ipfs files mkdir /chcid-test &&
+    ipfs files chcid --hash=blake2b-256 /chcid-test &&
+    ipfs files stat --hash /chcid-test > chcid_hash &&
+    ipfs cid format -f "%h" $(cat chcid_hash) > chcid_hashfn &&
+    echo blake2b-256 > chcid_hashfn_expect &&
+    test_cmp chcid_hashfn_expect chcid_hashfn &&
+    ipfs files rm -r /chcid-test
+  '
+
+  # MFS root CID format is controlled by Import config, not chcid
+  test_expect_success "set Import.CidVersion=1 for cidv1 root" '
+    ipfs config --json Import.CidVersion 1
+  '
+  if [ "$EXTRA" = "with-daemon" ]; then
+    restart_daemon
+  fi
+
+  test_expect_success "root hash is cidv1 after Import config change" '
+    echo bafybeiczsscdsbs7ffqz55asqdf3smv6klcw3gofszvwlyarci47bgf354 > hash_expect &&
     ipfs files stat --hash / > hash_actual &&
     test_cmp hash_expect hash_actual
   '
 
-  ROOT_HASH=zdj7Whmtnx23bR7c7E1Yn3zWYWjnvT4tpzWYGaBMyqcopDWrx
-    test_files_api "($EXTRA, cidv1 root)"
+  # cidv1 root: root set to CIDv1 via Import config, all new dirs/files also CIDv1
+  ROOT_HASH=bafybeickjecu37qv6ue54ofk3n4rpm4g4abuofz7yc4qn4skffy263kkou
+  CATS_HASH=bafybeihsqinttigpskqqj63wgalrny3lifvqv5ml7igrirdhlcf73l3wvm
+  test_files_api "($EXTRA, cidv1 root)"
 
-  if [ "$EXTRA" = "offline" ]; then
-    test_expect_success "can update root hash to blake2b-256" '
-    ipfs files chcid --hash=blake2b-256 / &&
-      echo zDMZof1kvswQMT8txrmnb3JGBuna6qXCTry6hSifrkZEd6VmHbBm > hash_expect &&
+  if [ "$EXTRA" = "with-daemon" ]; then
+    test_expect_success "set Import.HashFunction=blake2b-256" '
+      ipfs config Import.HashFunction blake2b-256
+    '
+    restart_daemon
+
+    test_expect_success "root hash is blake2b-256 after Import config change" '
+      echo bafykbzacebugfutjir6qie7apo5shpry32ruwfi762uytd5g3u2gk7tpscndq > hash_expect &&
       ipfs files stat --hash / > hash_actual &&
       test_cmp hash_expect hash_actual
     '
-    ROOT_HASH=zDMZof1kxEsAwSgCZsGQRVcHCMtHLjkUQoiZUbZ87erpPQJGUeW8
-    CATS_HASH=zDMZof1kuAhr3zBkxq48V7o9HJZCTVyu1Wd9wnZtVcPJLW8xnGft
-    FILE_HASH=zDMZof1kxbB9CvxgRioBzESbGnZUxtSCsZ18H1EUkxDdWt1DYEkK
-    TRUNC_HASH=zDMZof1kpH1vxK3k2TeYc8w59atCbzMzrhZonsztMWSptVro2zQa
+    # blake2b-256 root: using blake2b-256 hash instead of sha2-256
+    ROOT_HASH=bafykbzaceaebvwrjdw5rfhqqh5miaq3g42yybnrw3kxxxx43ggyttm6xn2zek
+    CATS_HASH=bafykbzaceaqvpxs3dfl7su6744jgyvifbusow2tfixdy646chasdwyz2boagc
+    FILE_HASH=bafykbzaceca45w2i3o3q3ctqsezdv5koakz7sxsw37ygqjg4w54m2bshzevxy
+    TRUNC_HASH=bafykbzaceadeu7onzmlq7v33ytjpmo37rsqk2q6mzeqf5at55j32zxbcdbwig
     test_files_api "($EXTRA, blake2b-256 root)"
+
+    # Reset Import.HashFunction back to default
+    test_expect_success "reset Import.HashFunction to default" '
+      ipfs config --json Import.HashFunction null
+    '
   fi
 
-  test_expect_success "can update root hash back to cidv0" '
-    ipfs files chcid / --cid-version=0 &&
+  # Reset Import.CidVersion back to CIDv0
+  test_expect_success "reset Import.CidVersion to cidv0" '
+    ipfs config --json Import.CidVersion 0
+  '
+  if [ "$EXTRA" = "with-daemon" ]; then
+    restart_daemon
+  fi
+
+  test_expect_success "root hash is cidv0 after Import config reset" '
     echo QmUNLLsPACCz1vLxQVkXqqLX5R1X345qqfHbsf67hvA3Nn > hash_expect &&
     ipfs files stat --hash / > hash_actual &&
     test_cmp hash_expect hash_actual
   '
 }
 
-tests_for_files_api "online"
+tests_for_files_api "no-daemon"
 
-test_launch_ipfs_daemon --offline
+test_launch_ipfs_daemon_without_network
 
-ONLINE=1 # set online flag so tests can easily tell
+WITH_DAEMON=1
+# FIXME: Used only on a specific test inside `test_files_api` but we should instead
+# propagate the `"with-daemon"` argument in its caller `tests_for_files_api`.
 
-tests_for_files_api "offline"
+tests_for_files_api "with-daemon"
 
-test_kill_ipfs_daemon --offline
+test_kill_ipfs_daemon
 
 test_expect_success "enable sharding in config" '
-  ipfs config --json Experimental.ShardingEnabled true
+  ipfs config --json Import.UnixFSHAMTDirectorySizeThreshold "\"1B\""
 '
 
-test_launch_ipfs_daemon --offline
+test_launch_ipfs_daemon_without_network
 
+# sharding cidv0: HAMT-sharded directory with 100 files, CIDv0
 SHARD_HASH=QmPkwLJTYZRGPJ8Lazr9qPdrLmswPtUjaDbEpmR9jEh1se
 test_sharding "(cidv0)"
 
-SHARD_HASH=zdj7WZXr6vG2Ne7ZLHGEKrGyF3pHBfAViEnmH9CoyvjrFQM8E
+# sharding cidv1: HAMT-sharded directory with 100 files, CIDv1
+SHARD_HASH=bafybeibu4i76qi26jhpgskqhivuactsvdsia44swpi7eaw45r7c3c3lhs4
 test_sharding "(cidv1 root)" "--cid-version=1"
+
+test_kill_ipfs_daemon
+
+# Test automatic sharding and unsharding
+
+# We shard based on size with a threshold of 256 KiB (see config file docs)
+# above which directories are sharded.
+#
+# The directory size is estimated as the size of each link. Links are roughly
+# the entry name + the CID byte length (e.g. 34 bytes for a CIDv0). So for
+# entries of length 10 we need 256 KiB / (34 + 10) ~ 6000 entries in the
+# directory to trigger sharding.
+test_expect_success "set up automatic sharding/unsharding data" '
+  mkdir big_dir
+  for i in `seq 5960` # Just above the number of entries that trigger sharding for 256KiB
+  do
+    echo $i > big_dir/`printf "file%06d" $i` # fixed length of 10 chars
+  done
+'
+
+test_expect_success "reset automatic sharding" '
+  ipfs config --json Import.UnixFSHAMTDirectorySizeThreshold null
+'
+
+test_launch_ipfs_daemon_without_network
+
+LARGE_SHARDED="QmWfjnRWRvdvYezQWnfbvrvY7JjrpevsE9cato1x76UqGr"
+LARGE_MINUS_5_UNSHARDED="QmbVxi5zDdzytrjdufUejM92JsWj8wGVmukk6tiPce3p1m"
+
+test_add_large_sharded_dir() {
+  exphash="$1"
+  test_expect_success "ipfs add on directory succeeds" '
+    ipfs add -r -Q big_dir > shardbigdir_out &&
+    echo "$exphash" > shardbigdir_exp &&
+    test_cmp shardbigdir_exp shardbigdir_out
+  '
+
+  test_expect_success "can access a path under the dir" '
+    ipfs cat "$exphash/file000030" > file30_out &&
+    test_cmp big_dir/file000030 file30_out
+  '
+}
+
+test_add_large_sharded_dir "$LARGE_SHARDED"
+
+test_expect_success "remove a few entries from big_dir/ to trigger unsharding" '
+  ipfs files cp /ipfs/"$LARGE_SHARDED" /big_dir &&
+  for i in `seq 5`
+  do
+    ipfs files rm /big_dir/`printf "file%06d" $i`
+  done &&
+  ipfs files stat --hash /big_dir > unshard_dir_hash &&
+  echo "$LARGE_MINUS_5_UNSHARDED" > unshard_exp &&
+  test_cmp unshard_exp unshard_dir_hash
+'
+
+test_expect_success "add a few entries to big_dir/ to retrigger sharding" '
+  for i in `seq 5`
+  do
+    ipfs files cp /ipfs/"$LARGE_SHARDED"/`printf "file%06d" $i` /big_dir/`printf "file%06d" $i`
+  done &&
+  ipfs files stat --hash /big_dir > shard_dir_hash &&
+  echo "$LARGE_SHARDED" > shard_exp &&
+  test_cmp shard_exp shard_dir_hash
+'
 
 test_kill_ipfs_daemon
 

@@ -1,35 +1,33 @@
 // Package commands implements the ipfs command interface
 //
-// Using github.com/ipfs/go-ipfs/commands to define the command line and HTTP
+// Using github.com/ipfs/kubo/commands to define the command line and HTTP
 // APIs.  This is the interface available to folks using IPFS from outside of
 // the Go language.
 package commands
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"os"
-	"sort"
+	"slices"
 	"strings"
 
-	e "github.com/ipfs/go-ipfs/core/commands/e"
-
-	cmds "gx/ipfs/QmR77mMvvh8mJBBWQmBfQBu8oD38NUN4KE9SL2gDgAQNc6/go-ipfs-cmds"
-	"gx/ipfs/Qmde5VP1qUkyQXKCfmEUA7bP64V2HAptbJ7phuPp7jXWwg/go-ipfs-cmdkit"
+	cmds "github.com/ipfs/go-ipfs-cmds"
 )
 
 type commandEncoder struct {
 	w io.Writer
 }
 
-func (e *commandEncoder) Encode(v interface{}) error {
+func (e *commandEncoder) Encode(v any) error {
 	var (
 		cmd *Command
 		ok  bool
 	)
 
 	if cmd, ok = v.(*Command); !ok {
-		return fmt.Errorf(`core/commands: uenxpected type %T, expected *"core/commands".Command`, v)
+		return fmt.Errorf(`core/commands: unexpected type %T, expected *"core/commands".Command`, v)
 	}
 
 	for _, s := range cmdPathStrings(cmd, cmd.showOpts) {
@@ -62,13 +60,17 @@ const (
 // and returns a command that lists the subcommands in that root
 func CommandsCmd(root *cmds.Command) *cmds.Command {
 	return &cmds.Command{
-		Helptext: cmdkit.HelpText{
+		Helptext: cmds.HelpText{
 			Tagline:          "List all available commands.",
 			ShortDescription: `Lists all available commands (and subcommands) and exits.`,
 		},
-		Options: []cmdkit.Option{
-			cmdkit.BoolOption(flagsOptionName, "f", "Show command flags"),
+		Subcommands: map[string]*cmds.Command{
+			"completion": CompletionCmd(root),
 		},
+		Options: []cmds.Option{
+			cmds.BoolOption(flagsOptionName, "f", "Show command flags"),
+		},
+		Extra: CreateCmdExtras(SetDoesNotUseRepo(true)),
 		Run: func(req *cmds.Request, res cmds.ResponseEmitter, env cmds.Environment) error {
 			rootCmd := cmd2outputCmd("ipfs", root)
 			rootCmd.showOpts, _ = req.Options[flagsOptionName].(bool)
@@ -129,26 +131,100 @@ func cmdPathStrings(cmd *Command, showOptions bool) []string {
 	}
 
 	recurse("", cmd)
-	sort.Sort(sort.StringSlice(cmds))
+	slices.Sort(cmds)
 	return cmds
 }
 
-// changes here will also need to be applied at
-// - ./dag/dag.go
-// - ./object/object.go
-// - ./files/files.go
-// - ./unixfs/unixfs.go
-func unwrapOutput(i interface{}) (interface{}, error) {
-	var (
-		ch <-chan interface{}
-		ok bool
-	)
+func CompletionCmd(root *cmds.Command) *cmds.Command {
+	return &cmds.Command{
+		Helptext: cmds.HelpText{
+			Tagline: "Generate shell completions.",
+		},
+		NoRemote: true,
+		Subcommands: map[string]*cmds.Command{
+			"bash": {
+				Helptext: cmds.HelpText{
+					Tagline:          "Generate bash shell completions.",
+					ShortDescription: "Generates command completions for the bash shell.",
+					LongDescription: `
+Generates command completions for the bash shell.
 
-	if ch, ok = i.(<-chan interface{}); !ok {
-		return nil, e.TypeErr(ch, i)
+The simplest way to see it working is write the completions
+to a file and then source it:
+
+  > ipfs commands completion bash > ipfs-completion.bash
+  > source ./ipfs-completion.bash
+
+To install the completions permanently, they can be moved to
+/etc/bash_completion.d or sourced from your ~/.bashrc file.
+`,
+				},
+				NoRemote: true,
+				Run: func(req *cmds.Request, res cmds.ResponseEmitter, env cmds.Environment) error {
+					var buf bytes.Buffer
+					if err := writeBashCompletions(root, &buf); err != nil {
+						return err
+					}
+					res.SetLength(uint64(buf.Len()))
+					return res.Emit(&buf)
+				},
+			},
+			"zsh": {
+				Helptext: cmds.HelpText{
+					Tagline:          "Generate zsh shell completions.",
+					ShortDescription: "Generates command completions for the zsh shell.",
+					LongDescription: `
+Generates command completions for the zsh shell.
+
+The simplest way to see it working is write the completions
+to a file and then source it:
+
+  > ipfs commands completion zsh > ipfs-completion.zsh
+  > source ./ipfs-completion.zsh
+
+To install the completions permanently, they can be moved to
+/etc/zsh/completions or sourced from your ~/.zshrc file.
+`,
+				},
+				NoRemote: true,
+				Run: func(req *cmds.Request, res cmds.ResponseEmitter, env cmds.Environment) error {
+					var buf bytes.Buffer
+					if err := writeZshCompletions(root, &buf); err != nil {
+						return err
+					}
+					res.SetLength(uint64(buf.Len()))
+					return res.Emit(&buf)
+				},
+			},
+			"fish": {
+				Helptext: cmds.HelpText{
+					Tagline:          "Generate fish shell completions.",
+					ShortDescription: "Generates command completions for the fish shell.",
+					LongDescription: `
+Generates command completions for the fish shell.
+
+The simplest way to see it working is write the completions
+to a file and then source it:
+
+  > ipfs commands completion fish > ipfs-completion.fish
+  > source ./ipfs-completion.fish
+
+To install the completions permanently, they can be moved to
+/etc/fish/completions or ~/.config/fish/completions or sourced from your ~/.config/fish/config.fish file.
+`,
+				},
+				NoRemote: true,
+				Run: func(req *cmds.Request, res cmds.ResponseEmitter, env cmds.Environment) error {
+					var buf bytes.Buffer
+					if err := writeFishCompletions(root, &buf); err != nil {
+						return err
+					}
+					res.SetLength(uint64(buf.Len()))
+					return res.Emit(&buf)
+				},
+			},
+		},
 	}
-
-	return <-ch, nil
 }
 
 type nonFatalError string
@@ -156,13 +232,12 @@ type nonFatalError string
 // streamResult is a helper function to stream results that possibly
 // contain non-fatal errors.  The helper function is allowed to panic
 // on internal errors.
-func streamResult(procVal func(interface{}, io.Writer) nonFatalError) func(cmds.Response, cmds.ResponseEmitter) error {
-	return func(res cmds.Response, re cmds.ResponseEmitter) (err error) {
+func streamResult(procVal func(any, io.Writer) nonFatalError) func(cmds.Response, cmds.ResponseEmitter) error {
+	return func(res cmds.Response, re cmds.ResponseEmitter) (rerr error) {
 		defer func() {
 			if r := recover(); r != nil {
-				err = fmt.Errorf("internal error: %v", r)
+				rerr = fmt.Errorf("internal error: %v", r)
 			}
-			re.Close()
 		}()
 
 		var errors bool
@@ -172,7 +247,8 @@ func streamResult(procVal func(interface{}, io.Writer) nonFatalError) func(cmds.
 				if err == io.EOF {
 					break
 				}
-				return err
+				rerr = err
+				return
 			}
 
 			errorMsg := procVal(v, os.Stdout)
@@ -184,8 +260,8 @@ func streamResult(procVal func(interface{}, io.Writer) nonFatalError) func(cmds.
 		}
 
 		if errors {
-			return fmt.Errorf("errors while displaying some entries")
+			rerr = fmt.Errorf("errors while displaying some entries")
 		}
-		return nil
+		return
 	}
 }

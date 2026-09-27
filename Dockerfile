@@ -1,86 +1,106 @@
-FROM golang:1.11-stretch
-MAINTAINER Lars Gierth <lgierth@ipfs.io>
+# syntax=docker/dockerfile:1
+# Enables BuildKit with cache mounts for faster builds
 
-# There is a copy of this Dockerfile called Dockerfile.fast,
-# which is optimized for build time, instead of image size.
-#
-# Please keep these two Dockerfiles in sync.
+# GO_VERSION is the source of truth for the Go toolchain version. CI parses
+# the `go` directive from go.mod and overrides this build arg, so the
+# published image always matches the version `setup-go` installs from go.mod.
+# The default below is what `docker build .` (without --build-arg) uses, and
+# `.github/workflows/docker-check.yml` lints that this default stays in sync
+# with go.mod. When bumping Go, update both go.mod and this default together.
+ARG GO_VERSION=1.26.5
+FROM --platform=${BUILDPLATFORM:-linux/amd64} golang:${GO_VERSION} AS builder
 
-ENV GX_IPFS ""
-ENV SRC_DIR /go/src/github.com/ipfs/go-ipfs
+ARG TARGETOS TARGETARCH
+
+ENV SRC_DIR=/kubo
+
+# Cache go module downloads between builds for faster rebuilds
+COPY go.mod go.sum $SRC_DIR/
+WORKDIR $SRC_DIR
+RUN --mount=type=cache,target=/go/pkg/mod \
+  go mod download
 
 COPY . $SRC_DIR
 
-# Build the thing.
-# Also: fix getting HEAD commit hash via git rev-parse.
-# Also: allow using a custom IPFS API endpoint.
-RUN cd $SRC_DIR \
-  && mkdir .git/objects \
-  && ([ -z "$GX_IPFS" ] || echo $GX_IPFS > /root/.ipfs/api) \
-  && make build
+# Preload an in-tree but disabled-by-default plugin by adding it to the IPFS_PLUGINS variable
+# e.g. docker build --build-arg IPFS_PLUGINS="foo bar baz"
+ARG IPFS_PLUGINS
 
-# Get su-exec, a very minimal tool for dropping privileges,
-# and tini, a very minimal init daemon for containers
-ENV SUEXEC_VERSION v0.2
-ENV TINI_VERSION v0.16.1
-RUN set -x \
-  && cd /tmp \
-  && git clone https://github.com/ncopa/su-exec.git \
-  && cd su-exec \
-  && git checkout -q $SUEXEC_VERSION \
-  && make \
-  && cd /tmp \
-  && wget -q -O tini https://github.com/krallin/tini/releases/download/$TINI_VERSION/tini \
-  && chmod +x tini
+# Allow for other targets to be built, e.g.: docker build --build-arg MAKE_TARGET="nofuse"
+ARG MAKE_TARGET=build
 
-# Get the TLS CA certificates, they're not provided by busybox.
-RUN apt-get update && apt-get install -y ca-certificates
+# Build ipfs binary with cached go modules and build cache.
+# mkdir .git/objects allows git rev-parse to read commit hash for version info
+RUN --mount=type=cache,target=/go/pkg/mod \
+  --mount=type=cache,target=/root/.cache/go-build \
+  mkdir -p .git/objects \
+  && GOOS=$TARGETOS GOARCH=$TARGETARCH GOFLAGS=-buildvcs=false make ${MAKE_TARGET} IPFS_PLUGINS=$IPFS_PLUGINS
 
-# Now comes the actual target image, which aims to be as small as possible.
-FROM busybox:1-glibc
-MAINTAINER Lars Gierth <lgierth@ipfs.io>
+# Extract required runtime tools from Debian.
+# We use Debian instead of Alpine because we need glibc compatibility
+# for the busybox base image we're using.
+FROM debian:bookworm-slim AS utilities
+RUN set -eux; \
+	apt-get update; \
+	apt-get install -y --no-install-recommends \
+		tini \
+    # Using gosu (~2MB) instead of su-exec (~20KB) because it's easier to
+    # install on Debian. Useful links:
+    # - https://github.com/ncopa/su-exec#why-reinvent-gosu
+    # - https://github.com/tianon/gosu/issues/52#issuecomment-441946745
+		gosu \
+    # fusermount enables IPFS mount commands
+    fuse \
+    ca-certificates \
+	; \
+	apt-get clean; \
+	rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
-# Get the ipfs binary, entrypoint script, and TLS CAs from the build container.
-ENV SRC_DIR /go/src/github.com/ipfs/go-ipfs
-COPY --from=0 $SRC_DIR/cmd/ipfs/ipfs /usr/local/bin/ipfs
-COPY --from=0 $SRC_DIR/bin/container_daemon /usr/local/bin/start_ipfs
-COPY --from=0 /tmp/su-exec/su-exec /sbin/su-exec
-COPY --from=0 /tmp/tini /sbin/tini
-COPY --from=0 /etc/ssl/certs /etc/ssl/certs
+# Final minimal image with shell for debugging (busybox provides sh)
+FROM busybox:stable-glibc
 
-# This shared lib (part of glibc) doesn't seem to be included with busybox.
-COPY --from=0 /lib/x86_64-linux-gnu/libdl-2.24.so /lib/libdl.so.2
+# Copy ipfs binary, startup scripts, and runtime dependencies
+ENV SRC_DIR=/kubo
+COPY --from=utilities /usr/sbin/gosu /sbin/gosu
+COPY --from=utilities /usr/bin/tini /sbin/tini
+COPY --from=utilities /bin/fusermount /usr/local/bin/fusermount
+COPY --from=utilities /etc/ssl/certs /etc/ssl/certs
+COPY --from=builder $SRC_DIR/cmd/ipfs/ipfs /usr/local/bin/ipfs
+COPY --from=builder --chmod=755 $SRC_DIR/bin/container_daemon /usr/local/bin/start_ipfs
+COPY --from=builder $SRC_DIR/bin/container_init_run /usr/local/bin/container_init_run
 
-# Swarm TCP; should be exposed to the public
-EXPOSE 4001
-# Daemon API; must not be exposed publicly but to client services under you control
+# Set SUID for fusermount to enable FUSE mounting by non-root user
+RUN chmod 4755 /usr/local/bin/fusermount
+
+# Swarm P2P port (TCP/UDP) - expose publicly for peer connections
+EXPOSE 4001 4001/udp
+# API port - keep private, only for trusted clients
 EXPOSE 5001
-# Web Gateway; can be exposed publicly with a proxy, e.g. as https://ipfs.example.org
+# Gateway port - can be exposed publicly via reverse proxy
 EXPOSE 8080
-# Swarm Websockets; must be exposed publicly when the node is listening using the websocket transport (/ipX/.../tcp/8081/ws).
+# Swarm WebSockets - expose publicly for browser-based peers
 EXPOSE 8081
 
-# Create the fs-repo directory
-ENV IPFS_PATH /data/ipfs
-RUN mkdir -p $IPFS_PATH \
+# Create ipfs user (uid 1000) and required directories with proper ownership
+ENV IPFS_PATH=/data/ipfs
+RUN mkdir -p $IPFS_PATH /ipfs /ipns /mfs /container-init.d \
   && adduser -D -h $IPFS_PATH -u 1000 -G users ipfs \
-  && chown ipfs:users $IPFS_PATH
+  && chown ipfs:users $IPFS_PATH /ipfs /ipns /mfs /container-init.d
 
-# Switch to a non-privileged user
-USER ipfs
-
-# Expose the fs-repo as a volume.
-# start_ipfs initializes an fs-repo if none is mounted.
-# Important this happens after the USER directive so permission are correct.
+# Volume for IPFS repository data persistence
 VOLUME $IPFS_PATH
 
 # The default logging level
-ENV IPFS_LOGGING ""
+ENV GOLOG_LOG_LEVEL=""
 
-# This just makes sure that:
-# 1. There's an fs-repo, and initializes one if there isn't.
-# 2. The API and Gateway are accessible from outside the container.
+# Entrypoint initializes IPFS repo if needed and configures networking.
+# tini ensures proper signal handling and zombie process cleanup
 ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/start_ipfs"]
 
-# Execute the daemon subcommand by default
-CMD ["daemon", "--migrate=true"]
+# Health check via "ipfs diag healthy": verifies RPC + DAG pipeline, and
+# fails after SIGINT/SIGTERM to catch half-shutdown states.
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD ipfs --api=/ip4/127.0.0.1/tcp/5001 diag healthy > /dev/null 2>&1 || exit 1
+
+# Default: run IPFS daemon with auto-migration enabled
+CMD ["daemon", "--migrate=true", "--agent-version-suffix=docker"]

@@ -4,15 +4,15 @@ import (
 	"fmt"
 	"path/filepath"
 
-	"github.com/ipfs/go-ipfs/plugin"
-	"github.com/ipfs/go-ipfs/repo"
-	"github.com/ipfs/go-ipfs/repo/fsrepo"
+	"github.com/ipfs/kubo/plugin"
+	"github.com/ipfs/kubo/repo"
+	"github.com/ipfs/kubo/repo/fsrepo"
 
-	levelds "gx/ipfs/QmUhiHo586S2XpAFvkL1xDxeNwVHVQg7sDTxzS8ituQawr/go-ds-leveldb"
-	ldbopts "gx/ipfs/QmbBhyDKsY4mbY6xsKt3qu9Y7FPvMJ6qbD8AMjYYvPRw1g/goleveldb/leveldb/opt"
+	levelds "github.com/ipfs/go-ds-leveldb"
+	ldbopts "github.com/syndtr/goleveldb/leveldb/opt"
 )
 
-// Plugins is exported list of plugins that will be loaded
+// Plugins is exported list of plugins that will be loaded.
 var Plugins = []plugin.Plugin{
 	&leveldsPlugin{},
 }
@@ -29,7 +29,7 @@ func (*leveldsPlugin) Version() string {
 	return "0.1.0"
 }
 
-func (*leveldsPlugin) Init() error {
+func (*leveldsPlugin) Init(_ *plugin.Environment) error {
 	return nil
 }
 
@@ -42,10 +42,10 @@ type datastoreConfig struct {
 	compression ldbopts.Compression
 }
 
-// BadgerdsDatastoreConfig returns a configuration stub for a badger datastore
-// from the given parameters
+// DatastoreConfigParser returns a configuration stub for a badger datastore
+// from the given parameters.
 func (*leveldsPlugin) DatastoreConfigParser() fsrepo.ConfigFromMap {
-	return func(params map[string]interface{}) (fsrepo.DatastoreConfig, error) {
+	return func(params map[string]any) (fsrepo.DatastoreConfig, error) {
 		var c datastoreConfig
 		var ok bool
 
@@ -54,12 +54,12 @@ func (*leveldsPlugin) DatastoreConfigParser() fsrepo.ConfigFromMap {
 			return nil, fmt.Errorf("'path' field is missing or not string")
 		}
 
-		switch cm := params["compression"].(string); cm {
+		switch cm := params["compression"]; cm {
 		case "none":
 			c.compression = ldbopts.NoCompression
 		case "snappy":
 			c.compression = ldbopts.SnappyCompression
-		case "":
+		case "", nil:
 			c.compression = ldbopts.DefaultCompression
 		default:
 			return nil, fmt.Errorf("unrecognized value for compression: %s", cm)
@@ -70,7 +70,7 @@ func (*leveldsPlugin) DatastoreConfigParser() fsrepo.ConfigFromMap {
 }
 
 func (c *datastoreConfig) DiskSpec() fsrepo.DiskSpec {
-	return map[string]interface{}{
+	return map[string]any{
 		"type": "levelds",
 		"path": c.path,
 	}

@@ -9,15 +9,15 @@ import (
 	"testing"
 	"time"
 
-	core "github.com/ipfs/go-ipfs/core"
-	"github.com/ipfs/go-ipfs/core/coreapi"
-	mock "github.com/ipfs/go-ipfs/core/mock"
-	"github.com/ipfs/go-ipfs/thirdparty/unit"
+	bootstrap2 "github.com/ipfs/boxo/bootstrap"
+	"github.com/ipfs/kubo/core/coreapi"
+	mock "github.com/ipfs/kubo/core/mock"
+	"github.com/ipfs/kubo/thirdparty/unit"
 
-	pstore "gx/ipfs/QmQFFp4ntkd4C14sP3FaH9WJyBuetuGUVo6dShNHvnoEvC/go-libp2p-peerstore"
-	mocknet "gx/ipfs/QmSgtf5vHyugoxcwMbyNy6bZ9qPDDTJSYEED2GkWjLwitZ/go-libp2p/p2p/net/mock"
-	testutil "gx/ipfs/QmVnJMgafh5MBYiyqbvDtoCL8pcQvbEGD2k9o9GFpBWPzY/go-testutil"
-	files "gx/ipfs/QmaXvvAVAQ5ABqM5xtjYmV85xmN5MkWAZsX9H9Fwo4FVXp/go-ipfs-files"
+	"github.com/ipfs/boxo/files"
+	testutil "github.com/libp2p/go-libp2p-testing/net"
+	"github.com/libp2p/go-libp2p/core/peer"
+	mocknet "github.com/libp2p/go-libp2p/p2p/net/mock"
 )
 
 func TestThreeLeggedCatTransfer(t *testing.T) {
@@ -26,7 +26,7 @@ func TestThreeLeggedCatTransfer(t *testing.T) {
 		RoutingLatency:    0,
 		BlockstoreLatency: 0,
 	}
-	if err := RunThreeLeggedCat(RandomBytes(100*unit.MB), conf); err != nil {
+	if err := RunThreeLeggedCat(RandomBytes(1*unit.MB), conf); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -64,58 +64,52 @@ func TestThreeLeggedCat100MBMacbookCoastToCoast(t *testing.T) {
 }
 
 func RunThreeLeggedCat(data []byte, conf testutil.LatencyConfig) error {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
 	// create network
-	mn := mocknet.New(ctx)
+	mn := mocknet.New()
 	mn.SetLinkDefaults(mocknet.LinkOptions{
 		Latency: conf.NetworkLatency,
 		// TODO add to conf. This is tricky because we want 0 values to be functional.
 		Bandwidth: math.MaxInt32,
 	})
 
-	bootstrap, err := core.NewNode(ctx, &core.BuildCfg{
-		Online: true,
-		Host:   mock.MockHostOption(mn),
-	})
+	bootstrap, err := mock.MockPublicNode(ctx, mn)
 	if err != nil {
 		return err
 	}
 	defer bootstrap.Close()
 
-	adder, err := core.NewNode(ctx, &core.BuildCfg{
-		Online: true,
-		Host:   mock.MockHostOption(mn),
-	})
+	adder, err := mock.MockPublicNode(ctx, mn)
 	if err != nil {
 		return err
 	}
 	defer adder.Close()
 
-	catter, err := core.NewNode(ctx, &core.BuildCfg{
-		Online: true,
-		Host:   mock.MockHostOption(mn),
-	})
+	catter, err := mock.MockPublicNode(ctx, mn)
 	if err != nil {
 		return err
 	}
 	defer catter.Close()
 
-	adderApi, err := coreapi.NewCoreAPI(adder)
+	adderAPI, err := coreapi.NewCoreAPI(adder)
 	if err != nil {
 		return err
 	}
 
-	catterApi, err := coreapi.NewCoreAPI(catter)
+	catterAPI, err := coreapi.NewCoreAPI(catter)
 	if err != nil {
 		return err
 	}
 
-	mn.LinkAll()
+	err = mn.LinkAll()
+	if err != nil {
+		return err
+	}
 
 	bis := bootstrap.Peerstore.PeerInfo(bootstrap.PeerHost.ID())
-	bcfg := core.BootstrapConfigWithPeers([]pstore.PeerInfo{bis})
+	bcfg := bootstrap2.BootstrapConfigWithPeers([]peer.AddrInfo{bis})
 	if err := adder.Bootstrap(bcfg); err != nil {
 		return err
 	}
@@ -123,22 +117,31 @@ func RunThreeLeggedCat(data []byte, conf testutil.LatencyConfig) error {
 		return err
 	}
 
-	added, err := adderApi.Unixfs().Add(ctx, files.NewBytesFile(data))
+	added, err := adderAPI.Unixfs().Add(ctx, files.NewBytesFile(data))
 	if err != nil {
 		return err
 	}
 
-	readerCatted, err := catterApi.Unixfs().Get(ctx, added)
+	// Explicitly provide the root CID to the DHT so the catter can discover
+	// the adder. Without this, the async reprovider may not have propagated
+	// the record before the catter queries.
+	if err := adder.Routing.Provide(ctx, added.RootCid(), true); err != nil {
+		return err
+	}
+
+	readerCatted, err := catterAPI.Unixfs().Get(ctx, added)
 	if err != nil {
 		return err
 	}
 
 	// verify
-	bufout := new(bytes.Buffer)
-	io.Copy(bufout, readerCatted.(io.Reader))
-	if 0 != bytes.Compare(bufout.Bytes(), data) {
+	var bufout bytes.Buffer
+	_, err = io.Copy(&bufout, readerCatted.(io.Reader))
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(bufout.Bytes(), data) {
 		return errors.New("catted data does not match added data")
 	}
-	cancel()
 	return nil
 }

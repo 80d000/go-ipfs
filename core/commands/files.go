@@ -2,67 +2,153 @@ package commands
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	gopath "path"
-	"sort"
+	"slices"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
 
-	"github.com/ipfs/go-ipfs/core"
-	"github.com/ipfs/go-ipfs/core/commands/cmdenv"
-	"github.com/ipfs/go-ipfs/core/coreapi/interface"
+	humanize "github.com/dustin/go-humanize"
+	oldcmds "github.com/ipfs/kubo/commands"
+	"github.com/ipfs/kubo/config"
+	"github.com/ipfs/kubo/core"
+	"github.com/ipfs/kubo/core/commands/cmdenv"
+	"github.com/ipfs/kubo/core/commands/cmdutils"
+	"github.com/ipfs/kubo/core/node"
+	fsrepo "github.com/ipfs/kubo/repo/fsrepo"
 
-	"gx/ipfs/QmPSBJL4momYnE7DcUyk2DVhD6rH488ZmHBGLbxNdhU44K/go-humanize"
-	"gx/ipfs/QmR77mMvvh8mJBBWQmBfQBu8oD38NUN4KE9SL2gDgAQNc6/go-ipfs-cmds"
-	cid "gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
-	ipld "gx/ipfs/QmRL22E4paat7ky7vx9MLpR97JHHbFPrg3ytFQw6qp1y1s/go-ipld-format"
-	dag "gx/ipfs/QmUtsx89yiCY6F8mbpP6ecXckiSzCBH7EvkKZuZEHBcr1m/go-merkledag"
-	"gx/ipfs/QmVBXaQqupXCFtS62xtr9EsKGkbK9LviqCKSzwcqzwvX9U/go-mfs"
-	"gx/ipfs/QmYZwey1thDTynSrvd6qQkX24UpTka6TFhQ2v569UpoqxD/go-ipfs-exchange-offline"
-	ft "gx/ipfs/QmZArMcsVDsXdcLbUx4844CuqKXBpbxdeiryM4cnmGTNRq/go-unixfs"
-	bservice "gx/ipfs/QmbgbNxC1PMyS2gbx7nf2jKNG7bZAfYJJebdK4ptBBWCz1/go-blockservice"
-	logging "gx/ipfs/QmcuXC5cxs79ro2cUuHs4HQ2bkDLJUYokwL8aivcX6HW3C/go-log"
-	cidenc "gx/ipfs/QmdPQx9fvN5ExVwMhRmh7YpCQJzJrFhd1AjVBwJmRMFJeX/go-cidutil/cidenc"
-	"gx/ipfs/Qmde5VP1qUkyQXKCfmEUA7bP64V2HAptbJ7phuPp7jXWwg/go-ipfs-cmdkit"
-	mh "gx/ipfs/QmerPMzPk1mJVowm8KgmoknWa4yCYvvugMPsgWmDNUvDLW/go-multihash"
+	bservice "github.com/ipfs/boxo/blockservice"
+	bstore "github.com/ipfs/boxo/blockstore"
+	offline "github.com/ipfs/boxo/exchange/offline"
+	dag "github.com/ipfs/boxo/ipld/merkledag"
+	ft "github.com/ipfs/boxo/ipld/unixfs"
+	mfs "github.com/ipfs/boxo/mfs"
+	"github.com/ipfs/boxo/path"
+	cid "github.com/ipfs/go-cid"
+	cidenc "github.com/ipfs/go-cidutil/cidenc"
+	"github.com/ipfs/go-datastore"
+	cmds "github.com/ipfs/go-ipfs-cmds"
+	ipld "github.com/ipfs/go-ipld-format"
+	logging "github.com/ipfs/go-log/v2"
+	iface "github.com/ipfs/kubo/core/coreiface"
+	mh "github.com/multiformats/go-multihash"
 )
 
 var flog = logging.Logger("cmds/files")
 
+// Global counter for unflushed MFS operations
+var noFlushOperationCounter atomic.Int64
+
+// Cached limit value (read once on first use)
+var (
+	noFlushLimit     int64
+	noFlushLimitInit sync.Once
+)
+
+// updateNoFlushCounter manages the counter for unflushed operations
+func updateNoFlushCounter(nd *core.IpfsNode, flush bool) error {
+	if flush {
+		// Reset counter when flushing
+		noFlushOperationCounter.Store(0)
+		return nil
+	}
+
+	// Cache the limit on first use (config doesn't change at runtime)
+	noFlushLimitInit.Do(func() {
+		noFlushLimit = int64(config.DefaultMFSNoFlushLimit)
+		if cfg, err := nd.Repo.Config(); err == nil && cfg.Internal.MFSNoFlushLimit != nil {
+			noFlushLimit = cfg.Internal.MFSNoFlushLimit.WithDefault(int64(config.DefaultMFSNoFlushLimit))
+		}
+	})
+
+	// Check if limit reached
+	if noFlushLimit > 0 && noFlushOperationCounter.Load() >= noFlushLimit {
+		return fmt.Errorf("reached limit of %d unflushed MFS operations. "+
+			"To resolve: 1) run 'ipfs files flush' to persist changes, "+
+			"2) use --flush=true (default), or "+
+			"3) increase Internal.MFSNoFlushLimit in config", noFlushLimit)
+	}
+
+	noFlushOperationCounter.Add(1)
+	return nil
+}
+
+// mfsPinLock takes the pin lock, a shared read-lock on the blockstore GC
+// locker. A concurrent "ipfs repo gc" holds the exclusive GC lock, so while
+// this lock is held GC cannot run, and GC waits for it to be released. Hold it
+// across a whole MFS mutation (including its flush) so GC cannot collect blocks
+// the mutation has written to the blockstore before they are linked into the
+// persisted MFS root. This mirrors how "ipfs add" guards its writes.
+func mfsPinLock(nd *core.IpfsNode, ctx context.Context) bstore.Unlocker {
+	return nd.Blockstore.PinLock(ctx)
+}
+
 // FilesCmd is the 'ipfs files' command
 var FilesCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
+	Helptext: cmds.HelpText{
 		Tagline: "Interact with unixfs files.",
 		ShortDescription: `
-Files is an API for manipulating IPFS objects as if they were a unix
+Files is an API for manipulating IPFS objects as if they were a Unix
 filesystem.
 
-NOTE:
-Most of the subcommands of 'ipfs files' accept the '--flush' flag. It defaults
-to true. Use caution when setting this flag to false. It will improve
+The files facility interacts with MFS (Mutable File System). MFS acts as a
+single, dynamic filesystem mount. MFS has a root CID that is transparently
+updated when a change happens (and can be checked with "ipfs files stat /").
+
+All files and folders within MFS are respected and will not be deleted
+during garbage collections. However, a DAG may be referenced in MFS without
+being fully available locally (MFS content is lazy loaded when accessed).
+MFS is independent from the list of pinned items ("ipfs pin ls"). Calls to
+"ipfs pin add" and "ipfs pin rm" will add and remove pins independently of
+MFS. If MFS content that was additionally pinned is removed by calling
+"ipfs files rm", it will still remain pinned.
+
+Content added with "ipfs add" (which by default also becomes pinned), is not
+added to MFS. Any content can be lazily referenced from MFS with the command
+"ipfs files cp /ipfs/<cid> /some/path/" (see ipfs files cp --help).
+
+NOTE: Most of the subcommands of 'ipfs files' accept the '--flush' flag. It
+defaults to true and ensures two things: 1) that the changes are reflected in
+the full MFS structure (updated CIDs) 2) that the parent-folder's cache is
+cleared. Use caution when setting this flag to false. It will improve
 performance for large numbers of file operations, but it does so at the cost
 of consistency guarantees. If the daemon is unexpectedly killed before running
 'ipfs files flush' on the files in question, then data may be lost. This also
-applies to running 'ipfs repo gc' concurrently with '--flush=false'
-operations.
-`,
+applies to run 'ipfs repo gc' concurrently with '--flush=false' operations.
+
+When using '--flush=false', operations are limited to prevent unbounded
+memory growth. After reaching Internal.MFSNoFlushLimit operations, further
+operations will fail until you run 'ipfs files flush'. This explicit failure
+(instead of auto-flushing) ensures you maintain control over when data is
+persisted, preventing unexpected partial states and making batch operations
+predictable. We recommend flushing paths regularly, especially folders with
+many write operations, to clear caches, free memory, and maintain good
+performance.`,
 	},
-	Options: []cmdkit.Option{
-		cmdkit.BoolOption(filesFlushOptionName, "f", "Flush target and ancestors after write.").WithDefault(true),
+	Options: []cmds.Option{
+		cmds.BoolOption(filesFlushOptionName, "f", "Flush target and ancestors after write.").WithDefault(true),
 	},
 	Subcommands: map[string]*cmds.Command{
-		"read":  filesReadCmd,
-		"write": filesWriteCmd,
-		"mv":    filesMvCmd,
-		"cp":    filesCpCmd,
-		"ls":    filesLsCmd,
-		"mkdir": filesMkdirCmd,
-		"stat":  filesStatCmd,
-		"rm":    filesRmCmd,
-		"flush": filesFlushCmd,
-		"chcid": filesChcidCmd,
+		"read":   filesReadCmd,
+		"write":  filesWriteCmd,
+		"mv":     filesMvCmd,
+		"cp":     filesCpCmd,
+		"ls":     filesLsCmd,
+		"mkdir":  filesMkdirCmd,
+		"stat":   filesStatCmd,
+		"rm":     filesRmCmd,
+		"flush":  filesFlushCmd,
+		"chcid":  filesChcidCmd,
+		"chmod":  filesChmodCmd,
+		"chroot": filesChrootCmd,
+		"touch":  filesTouchCmd,
 	},
 }
 
@@ -71,8 +157,10 @@ const (
 	filesHashOptionName       = "hash"
 )
 
-var cidVersionOption = cmdkit.IntOption(filesCidVersionOptionName, "cid-ver", "Cid version to use. (experimental)")
-var hashOption = cmdkit.StringOption(filesHashOptionName, "Hash function to use. Will set Cid version to 1 if used. (experimental)")
+var (
+	cidVersionOption = cmds.IntOption(filesCidVersionOptionName, "cid-ver", "Cid version to use. (experimental)")
+	hashOption       = cmds.StringOption(filesHashOptionName, "Hash function to use. Will set Cid version to 1 if used. (experimental)")
+)
 
 var errFormat = errors.New("format was set by multiple options. Only one format option is allowed")
 
@@ -85,6 +173,43 @@ type statOutput struct {
 	WithLocality   bool   `json:",omitempty"`
 	Local          bool   `json:",omitempty"`
 	SizeLocal      uint64 `json:",omitempty"`
+	Mode           uint32 `json:",omitempty"`
+	Mtime          int64  `json:",omitempty"`
+	MtimeNsecs     int    `json:",omitempty"`
+}
+
+func (s *statOutput) MarshalJSON() ([]byte, error) {
+	type so statOutput
+	out := &struct {
+		*so
+		Mode string `json:",omitempty"`
+	}{so: (*so)(s)}
+
+	if s.Mode != 0 {
+		out.Mode = fmt.Sprintf("%04o", s.Mode)
+	}
+	return json.Marshal(out)
+}
+
+func (s *statOutput) UnmarshalJSON(data []byte) error {
+	var err error
+	type so statOutput
+	tmp := &struct {
+		*so
+		Mode string `json:",omitempty"`
+	}{so: (*so)(s)}
+
+	if err := json.Unmarshal(data, &tmp); err != nil {
+		return err
+	}
+
+	if tmp.Mode != "" {
+		mode, err := strconv.ParseUint(tmp.Mode, 8, 32)
+		if err == nil {
+			s.Mode = uint32(mode)
+		}
+	}
+	return err
 }
 
 const (
@@ -92,32 +217,35 @@ const (
 Size: <size>
 CumulativeSize: <cumulsize>
 ChildBlocks: <childs>
-Type: <type>`
+Type: <type>
+Mode: <mode> (<mode-octal>)
+Mtime: <mtime>`
 	filesFormatOptionName    = "format"
 	filesSizeOptionName      = "size"
 	filesWithLocalOptionName = "with-local"
+	filesStatUnspecified     = "not set"
 )
 
 var filesStatCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
+	Helptext: cmds.HelpText{
 		Tagline: "Display file status.",
 	},
 
-	Arguments: []cmdkit.Argument{
-		cmdkit.StringArg("path", true, false, "Path to node to stat."),
+	Arguments: []cmds.Argument{
+		cmds.StringArg("path", true, false, "Path to node to stat."),
 	},
-	Options: []cmdkit.Option{
-		cmdkit.StringOption(filesFormatOptionName, "Print statistics in given format. Allowed tokens: "+
-			"<hash> <size> <cumulsize> <type> <childs>. Conflicts with other format options.").WithDefault(defaultStatFormat),
-		cmdkit.BoolOption(filesHashOptionName, "Print only hash. Implies '--format=<hash>'. Conflicts with other format options."),
-		cmdkit.BoolOption(filesSizeOptionName, "Print only size. Implies '--format=<cumulsize>'. Conflicts with other format options."),
-		cmdkit.BoolOption(filesWithLocalOptionName, "Compute the amount of the dag that is local, and if possible the total size"),
+	Options: []cmds.Option{
+		cmds.StringOption(filesFormatOptionName, "Print statistics in given format. Allowed tokens: "+
+			"<hash> <size> <cumulsize> <type> <childs> and optional <mode> <mode-octal> <mtime> <mtime-secs> <mtime-nsecs>."+
+			"Conflicts with other format options.").WithDefault(defaultStatFormat),
+		cmds.BoolOption(filesHashOptionName, "Print only hash. Implies '--format=<hash>'. Conflicts with other format options."),
+		cmds.BoolOption(filesSizeOptionName, "Print only size. Implies '--format=<cumulsize>'. Conflicts with other format options."),
+		cmds.BoolOption(filesWithLocalOptionName, "Compute the amount of the dag that is local, and if possible the total size"),
 	},
 	Run: func(req *cmds.Request, res cmds.ResponseEmitter, env cmds.Environment) error {
-
 		_, err := statGetFormatOptions(req)
 		if err != nil {
-			return cmdkit.Errorf(cmdkit.ErrClient, err.Error())
+			return cmds.Errorf(cmds.ErrClient, "invalid parameters: %s", err)
 		}
 
 		node, err := cmdenv.GetNode(env)
@@ -130,7 +258,7 @@ var filesStatCmd = &cmds.Command{
 			return err
 		}
 
-		path, err := checkPath(req.Arguments[0])
+		path, err := checkContentOrMfsPath(req.Arguments[0])
 		if err != nil {
 			return err
 		}
@@ -168,6 +296,9 @@ var filesStatCmd = &cmds.Command{
 		}
 
 		local, sizeLocal, err := walkBlock(req.Context, dagserv, nd)
+		if err != nil {
+			return err
+		}
 
 		o.WithLocality = true
 		o.Local = local
@@ -177,12 +308,29 @@ var filesStatCmd = &cmds.Command{
 	},
 	Encoders: cmds.EncoderMap{
 		cmds.Text: cmds.MakeTypedEncoder(func(req *cmds.Request, w io.Writer, out *statOutput) error {
+			mode, modeo := filesStatUnspecified, filesStatUnspecified
+			if out.Mode != 0 {
+				mode = strings.ToLower(os.FileMode(out.Mode).String())
+				modeo = "0" + strconv.FormatInt(int64(out.Mode&0x1FF), 8)
+			}
+			mtime, mtimes, mtimens := filesStatUnspecified, filesStatUnspecified, filesStatUnspecified
+			if out.Mtime > 0 {
+				mtime = time.Unix(out.Mtime, int64(out.MtimeNsecs)).UTC().Format("2 Jan 2006, 15:04:05 MST")
+				mtimes = strconv.FormatInt(out.Mtime, 10)
+				mtimens = strconv.Itoa(out.MtimeNsecs)
+			}
+
 			s, _ := statGetFormatOptions(req)
 			s = strings.Replace(s, "<hash>", out.Hash, -1)
 			s = strings.Replace(s, "<size>", fmt.Sprintf("%d", out.Size), -1)
 			s = strings.Replace(s, "<cumulsize>", fmt.Sprintf("%d", out.CumulativeSize), -1)
 			s = strings.Replace(s, "<childs>", fmt.Sprintf("%d", out.Blocks), -1)
 			s = strings.Replace(s, "<type>", out.Type, -1)
+			s = strings.Replace(s, "<mode>", mode, -1)
+			s = strings.Replace(s, "<mode-octal>", modeo, -1)
+			s = strings.Replace(s, "<mtime>", mtime, -1)
+			s = strings.Replace(s, "<mtime-secs>", mtimes, -1)
+			s = strings.Replace(s, "<mtime-nsecs>", mtimens, -1)
 
 			fmt.Fprintln(w, s)
 
@@ -205,7 +353,6 @@ func moreThanOne(a, b, c bool) bool {
 }
 
 func statGetFormatOptions(req *cmds.Request) (string, error) {
-
 	hash, _ := req.Options[filesHashOptionName].(bool)
 	size, _ := req.Options[filesSizeOptionName].(bool)
 	format, _ := req.Options[filesFormatOptionName].(string)
@@ -233,28 +380,7 @@ func statNode(nd ipld.Node, enc cidenc.Encoder) (*statOutput, error) {
 
 	switch n := nd.(type) {
 	case *dag.ProtoNode:
-		d, err := ft.FSNodeFromBytes(n.Data())
-		if err != nil {
-			return nil, err
-		}
-
-		var ndtype string
-		switch d.Type() {
-		case ft.TDirectory, ft.THAMTShard:
-			ndtype = "directory"
-		case ft.TFile, ft.TMetadata, ft.TRaw:
-			ndtype = "file"
-		default:
-			return nil, fmt.Errorf("unrecognized node type: %s", d.Type())
-		}
-
-		return &statOutput{
-			Hash:           enc.Encode(c),
-			Blocks:         len(nd.Links()),
-			Size:           d.FileSize(),
-			CumulativeSize: cumulsize,
-			Type:           ndtype,
-		}, nil
+		return statProtoNode(n, enc, c, cumulsize)
 	case *dag.RawNode:
 		return &statOutput{
 			Hash:           enc.Encode(c),
@@ -264,8 +390,46 @@ func statNode(nd ipld.Node, enc cidenc.Encoder) (*statOutput, error) {
 			Type:           "file",
 		}, nil
 	default:
-		return nil, fmt.Errorf("not unixfs node (proto or raw)")
+		return nil, errors.New("not unixfs node (proto or raw)")
 	}
+}
+
+func statProtoNode(n *dag.ProtoNode, enc cidenc.Encoder, cid cid.Cid, cumulsize uint64) (*statOutput, error) {
+	d, err := ft.FSNodeFromBytes(n.Data())
+	if err != nil {
+		return nil, err
+	}
+
+	stat := statOutput{
+		Hash:           enc.Encode(cid),
+		Blocks:         len(n.Links()),
+		Size:           d.FileSize(),
+		CumulativeSize: cumulsize,
+	}
+
+	switch d.Type() {
+	case ft.TDirectory, ft.THAMTShard:
+		stat.Type = "directory"
+	case ft.TFile, ft.TSymlink, ft.TMetadata, ft.TRaw:
+		stat.Type = "file"
+	default:
+		return nil, fmt.Errorf("unrecognized node type: %s", d.Type())
+	}
+
+	if mode := d.Mode(); mode != 0 {
+		stat.Mode = uint32(mode)
+	} else if d.Type() == ft.TSymlink {
+		stat.Mode = uint32(os.ModeSymlink | 0x1FF)
+	}
+
+	if mt := d.ModTime(); !mt.IsZero() {
+		stat.Mtime = mt.Unix()
+		if ns := mt.Nanosecond(); ns > 0 {
+			stat.MtimeNsecs = ns
+		}
+	}
+
+	return &stat, nil
 }
 
 func walkBlock(ctx context.Context, dagserv ipld.DAGService, nd ipld.Node) (bool, uint64, error) {
@@ -277,7 +441,7 @@ func walkBlock(ctx context.Context, dagserv ipld.DAGService, nd ipld.Node) (bool
 	for _, link := range nd.Links() {
 		child, err := dagserv.Get(ctx, link.Cid)
 
-		if err == ipld.ErrNotFound {
+		if ipld.IsNotFound(err) {
 			local = false
 			continue
 		}
@@ -287,7 +451,6 @@ func walkBlock(ctx context.Context, dagserv ipld.DAGService, nd ipld.Node) (bool
 		}
 
 		childLocal, childLocalSize, err := walkBlock(ctx, dagserv, child)
-
 		if err != nil {
 			return local, sizeLocal, err
 		}
@@ -300,16 +463,60 @@ func walkBlock(ctx context.Context, dagserv ipld.DAGService, nd ipld.Node) (bool
 	return local, sizeLocal, nil
 }
 
+var errFilesCpInvalidUnixFS = errors.New("cp: source must be a valid UnixFS (dag-pb or raw codec)")
 var filesCpCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
-		Tagline: "Copy files into mfs.",
+	Helptext: cmds.HelpText{
+		Tagline: "Add references to IPFS files and directories in MFS (or copy within MFS).",
+		ShortDescription: `
+"ipfs files cp" can be used to add references to any IPFS file or directory
+(usually in the form /ipfs/<CID>, but also any resolvable path) into MFS.
+This performs a lazy copy: the full DAG will not be fetched, only the root
+node being copied.
+
+It can also be used to copy files within MFS, but in the case when an
+IPFS-path matches an existing MFS path, the IPFS path wins.
+
+In order to add content to MFS from disk, you can use "ipfs add" to obtain the
+IPFS Content Identifier and then "ipfs files cp" to copy it into MFS:
+
+$ ipfs add --quieter --pin=false <your file>
+# ...
+# ... outputs the root CID at the end
+$ ipfs files cp /ipfs/<CID> /your/desired/mfs/path
+
+If you wish to fully copy content from a different IPFS peer into MFS, do not
+forget to force IPFS to fetch the full DAG after doing a "cp" operation. i.e:
+
+$ ipfs files cp /ipfs/<CID> /your/desired/mfs/path
+$ ipfs pin add <CID>
+
+The lazy-copy feature can also be used to protect partial DAG contents from
+garbage collection. i.e. adding the Wikipedia root to MFS would not download
+all the Wikipedia, but will prevent any downloaded Wikipedia-DAG content from
+being GC'ed.
+`,
 	},
-	Arguments: []cmdkit.Argument{
-		cmdkit.StringArg("source", true, false, "Source object to copy."),
-		cmdkit.StringArg("dest", true, false, "Destination to copy object to."),
+	Arguments: []cmds.Argument{
+		cmds.StringArg("source", true, false, "Source IPFS or MFS path to copy."),
+		cmds.StringArg("dest", true, false, "Destination within MFS."),
+	},
+	Options: []cmds.Option{
+		cmds.BoolOption(forceOptionName, "Force overwrite of existing files."),
+		cmds.BoolOption(filesParentsOptionName, "p", "Make parent directories as needed."),
 	},
 	Run: func(req *cmds.Request, res cmds.ResponseEmitter, env cmds.Environment) error {
 		nd, err := cmdenv.GetNode(env)
+		if err != nil {
+			return err
+		}
+		defer mfsPinLock(nd, req.Context).Unlock(req.Context)
+
+		cfg, err := nd.Repo.Config()
+		if err != nil {
+			return err
+		}
+
+		prefix, err := getPrefix(req, &cfg.Import)
 		if err != nil {
 			return err
 		}
@@ -319,9 +526,7 @@ var filesCpCmd = &cmds.Command{
 			return err
 		}
 
-		flush, _ := req.Options[filesFlushOptionName].(bool)
-
-		src, err := checkPath(req.Arguments[0])
+		src, err := checkContentOrMfsPath(req.Arguments[0])
 		if err != nil {
 			return err
 		}
@@ -341,15 +546,64 @@ var filesCpCmd = &cmds.Command{
 			return fmt.Errorf("cp: cannot get node from path %s: %s", src, err)
 		}
 
+		// Sanity-check: ensure root CID is a valid UnixFS (dag-pb or raw block)
+		// Context: https://github.com/ipfs/kubo/issues/10331
+		srcCidType := node.Cid().Type()
+		switch srcCidType {
+		case cid.Raw:
+			if _, ok := node.(*dag.RawNode); !ok {
+				return errFilesCpInvalidUnixFS
+			}
+		case cid.DagProtobuf:
+			if _, ok := node.(*dag.ProtoNode); !ok {
+				return errFilesCpInvalidUnixFS
+			}
+			if _, err = ft.FSNodeFromBytes(node.(*dag.ProtoNode).Data()); err != nil {
+				return fmt.Errorf("%w: %v", errFilesCpInvalidUnixFS, err)
+			}
+		default:
+			return errFilesCpInvalidUnixFS
+		}
+
+		mkParents, _ := req.Options[filesParentsOptionName].(bool)
+		if mkParents {
+			maxDirLinks := int(cfg.Import.UnixFSDirectoryMaxLinks.WithDefault(config.DefaultUnixFSDirectoryMaxLinks))
+			sizeEstimationMode := cfg.Import.HAMTSizeEstimationMode()
+			err := ensureContainingDirectoryExists(nd.FilesRoot, dst,
+				mfs.WithCidBuilder(prefix),
+				mfs.WithMaxLinks(maxDirLinks),
+				mfs.WithSizeEstimationMode(sizeEstimationMode),
+			)
+			if err != nil {
+				return err
+			}
+		}
+
+		force, _ := req.Options[forceOptionName].(bool)
+		if force {
+			if err = unlinkNodeIfExists(nd, dst); err != nil {
+				return fmt.Errorf("cp: cannot unlink existing file: %s", err)
+			}
+		}
+
+		flush, _ := req.Options[filesFlushOptionName].(bool)
+
+		if err := updateNoFlushCounter(nd, flush); err != nil {
+			return err
+		}
+
 		err = mfs.PutNode(nd.FilesRoot, dst, node)
 		if err != nil {
 			return fmt.Errorf("cp: cannot put node in path %s: %s", dst, err)
 		}
-
 		if flush {
-			err := mfs.FlushPath(nd.FilesRoot, dst)
-			if err != nil {
+			if _, err := mfs.FlushPath(req.Context, nd.FilesRoot, dst); err != nil {
 				return fmt.Errorf("cp: cannot flush the created file %s: %s", dst, err)
+			}
+			// Flush parent to clear directory cache and free memory.
+			parent := gopath.Dir(dst)
+			if _, err = mfs.FlushPath(req.Context, nd.FilesRoot, parent); err != nil {
+				return fmt.Errorf("cp: cannot flush the created file's parent folder %s: %s", dst, err)
 			}
 		}
 
@@ -358,22 +612,57 @@ var filesCpCmd = &cmds.Command{
 }
 
 func getNodeFromPath(ctx context.Context, node *core.IpfsNode, api iface.CoreAPI, p string) (ipld.Node, error) {
-	switch {
-	case strings.HasPrefix(p, "/ipfs/"):
-		np, err := iface.ParsePath(p)
-		if err != nil {
-			return nil, err
-		}
-
-		return api.ResolveNode(ctx, np)
-	default:
-		fsn, err := mfs.Lookup(node.FilesRoot, p)
-		if err != nil {
-			return nil, err
-		}
-
-		return fsn.GetNode()
+	// A content path or native IPFS URI (/ipfs/cid, ipfs://cid, /ipns/name, ...)
+	// is resolved through the DAG. Anything else is treated as an MFS path.
+	if pth, err := path.NewPathFromURI(p); err == nil {
+		return api.ResolveNode(ctx, pth)
 	}
+
+	fsn, err := mfs.Lookup(node.FilesRoot, p)
+	if err != nil {
+		return nil, err
+	}
+
+	return fsn.GetNode()
+}
+
+// checkContentOrMfsPath validates an argument that may be an MFS path, a content
+// path (/ipfs/cid), or a native IPFS URI (ipfs://cid). A URI is rewritten to its
+// canonical content-path form; anything else is validated as an MFS path.
+func checkContentOrMfsPath(arg string) (string, error) {
+	if p, err := path.NewPathFromURI(arg); err == nil {
+		return p.String(), nil
+	}
+	return checkPath(arg)
+}
+
+func unlinkNodeIfExists(node *core.IpfsNode, path string) error {
+	dir, name := gopath.Split(path)
+	parent, err := mfs.Lookup(node.FilesRoot, dir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+
+	pdir, ok := parent.(*mfs.Directory)
+	if !ok {
+		return fmt.Errorf("not a directory: %s", dir)
+	}
+
+	// Attempt to unlink if child is a file, ignore error since
+	// we are only concerned with unlinking an existing file.
+	child, err := pdir.Child(name)
+	if err != nil {
+		return nil // no child file, nothing to unlink
+	}
+
+	if child.Type() != mfs.TFile {
+		return fmt.Errorf("not a file: %s", path)
+	}
+
+	return pdir.Unlink(name)
 }
 
 type filesLsOutput struct {
@@ -381,15 +670,15 @@ type filesLsOutput struct {
 }
 
 const (
-	longOptionName     = "l"
+	longOptionName     = "long"
 	dontSortOptionName = "U"
 )
 
 var filesLsCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
+	Helptext: cmds.HelpText{
 		Tagline: "List directories in the local mutable namespace.",
 		ShortDescription: `
-List directories in the local mutable namespace.
+List directories in the local mutable namespace (works on both IPFS and MFS paths).
 
 Examples:
 
@@ -406,12 +695,12 @@ Examples:
     bar
 `,
 	},
-	Arguments: []cmdkit.Argument{
-		cmdkit.StringArg("path", false, false, "Path to show listing for. Defaults to '/'."),
+	Arguments: []cmds.Argument{
+		cmds.StringArg("path", false, false, "Path to show listing for. Defaults to '/'."),
 	},
-	Options: []cmdkit.Option{
-		cmdkit.BoolOption(longOptionName, "Use long listing format."),
-		cmdkit.BoolOption(dontSortOptionName, "Do not sort; list entries in directory order."),
+	Options: []cmds.Option{
+		cmds.BoolOption(longOptionName, "l", "Use long listing format."),
+		cmds.BoolOption(dontSortOptionName, "Do not sort; list entries in directory order."),
 	},
 	Run: func(req *cmds.Request, res cmds.ResponseEmitter, env cmds.Environment) error {
 		var arg string
@@ -492,8 +781,8 @@ Examples:
 		cmds.Text: cmds.MakeTypedEncoder(func(req *cmds.Request, w io.Writer, out *filesLsOutput) error {
 			noSort, _ := req.Options[dontSortOptionName].(bool)
 			if !noSort {
-				sort.Slice(out.Entries, func(i, j int) bool {
-					return strings.Compare(out.Entries[i].Name, out.Entries[j].Name) < 0
+				slices.SortFunc(out.Entries, func(a, b mfs.NodeListing) int {
+					return strings.Compare(a.Name, b.Name)
 				})
 			}
 
@@ -521,25 +810,25 @@ const (
 )
 
 var filesReadCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
-		Tagline: "Read a file in a given mfs.",
+	Helptext: cmds.HelpText{
+		Tagline: "Read a file from MFS.",
 		ShortDescription: `
 Read a specified number of bytes from a file at a given offset. By default,
-will read the entire file similar to unix cat.
+it will read the entire file similar to the Unix cat.
 
 Examples:
 
     $ ipfs files read /test/hello
     hello
-        `,
+	`,
 	},
 
-	Arguments: []cmdkit.Argument{
-		cmdkit.StringArg("path", true, false, "Path to file to be read."),
+	Arguments: []cmds.Argument{
+		cmds.StringArg("path", true, false, "Path to file to be read."),
 	},
-	Options: []cmdkit.Option{
-		cmdkit.Int64Option(filesOffsetOptionName, "o", "Byte offset to begin reading from."),
-		cmdkit.Int64Option(filesCountOptionName, "n", "Maximum number of bytes to read."),
+	Options: []cmds.Option{
+		cmds.Int64Option(filesOffsetOptionName, "o", "Byte offset to begin reading from."),
+		cmds.Int64Option(filesCountOptionName, "n", "Maximum number of bytes to read."),
 	},
 	Run: func(req *cmds.Request, res cmds.ResponseEmitter, env cmds.Environment) error {
 		nd, err := cmdenv.GetNode(env)
@@ -554,7 +843,7 @@ Examples:
 
 		fsn, err := mfs.Lookup(nd.FilesRoot, path)
 		if err != nil {
-			return err
+			return fmt.Errorf("%s: %w", path, err)
 		}
 
 		fi, ok := fsn.(*mfs.File)
@@ -562,7 +851,7 @@ Examples:
 			return fmt.Errorf("%s was not a file", path)
 		}
 
-		rfd, err := fi.Open(mfs.Flags{Read: true})
+		rfd, err := fi.Open(req.Context, mfs.Flags{Read: true})
 		if err != nil {
 			return err
 		}
@@ -614,10 +903,10 @@ func (crw *contextReaderWrapper) Read(b []byte) (int, error) {
 }
 
 var filesMvCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
+	Helptext: cmds.HelpText{
 		Tagline: "Move files.",
 		ShortDescription: `
-Move files around. Just like traditional unix mv.
+Move files around. Just like the traditional Unix mv.
 
 Example:
 
@@ -626,17 +915,22 @@ Example:
 `,
 	},
 
-	Arguments: []cmdkit.Argument{
-		cmdkit.StringArg("source", true, false, "Source file to move."),
-		cmdkit.StringArg("dest", true, false, "Destination path for file to be moved to."),
+	Arguments: []cmds.Argument{
+		cmds.StringArg("source", true, false, "Source file to move."),
+		cmds.StringArg("dest", true, false, "Destination path for file to be moved to."),
 	},
 	Run: func(req *cmds.Request, res cmds.ResponseEmitter, env cmds.Environment) error {
 		nd, err := cmdenv.GetNode(env)
 		if err != nil {
 			return err
 		}
+		defer mfsPinLock(nd, req.Context).Unlock(req.Context)
 
 		flush, _ := req.Options[filesFlushOptionName].(bool)
+
+		if err := updateNoFlushCounter(nd, flush); err != nil {
+			return err
+		}
 
 		src, err := checkPath(req.Arguments[0])
 		if err != nil {
@@ -648,10 +942,30 @@ Example:
 		}
 
 		err = mfs.Mv(nd.FilesRoot, src, dst)
-		if err == nil && flush {
-			err = mfs.FlushPath(nd.FilesRoot, "/")
+		if err != nil {
+			return err
 		}
-		return err
+		if flush {
+			parentSrc := gopath.Dir(src)
+			parentDst := gopath.Dir(dst)
+			// Flush parent to clear directory cache and free memory.
+			if _, err = mfs.FlushPath(req.Context, nd.FilesRoot, parentDst); err != nil {
+				return fmt.Errorf("cp: cannot flush the destination file's parent folder %s: %s", dst, err)
+			}
+
+			// Avoid re-flushing when moving within the same folder.
+			if parentSrc != parentDst {
+				if _, err = mfs.FlushPath(req.Context, nd.FilesRoot, parentSrc); err != nil {
+					return fmt.Errorf("cp: cannot flush the source's file's parent folder %s: %s", dst, err)
+				}
+			}
+
+			if _, err = mfs.FlushPath(req.Context, nd.FilesRoot, "/"); err != nil {
+				return err
+			}
+		}
+
+		return nil
 	},
 }
 
@@ -664,30 +978,36 @@ const (
 )
 
 var filesWriteCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
-		Tagline: "Write to a mutable file in a given filesystem.",
+	Helptext: cmds.HelpText{
+		Tagline: "Append to (modify) a file in MFS.",
 		ShortDescription: `
-Write data to a file in a given filesystem. This command allows you to specify
-a beginning offset to write to. The entire length of the input will be
-written.
+A low-level MFS command that allows you to append data to a file. If you want
+to add a file without modifying an existing one, use 'ipfs add --to-files'
+instead.
+`,
+		LongDescription: `
+A low-level MFS command that allows you to append data at the end of a file, or
+specify a beginning offset within a file to write to. The entire length of the
+input will be written.
 
 If the '--create' option is specified, the file will be created if it does not
-exist. Nonexistant intermediate directories will not be created.
+exist. Nonexistent intermediate directories will not be created unless the
+'--parents' option is specified.
 
 Newly created files will have the same CID version and hash function of the
-parent directory unless the --cid-version and --hash options are used.
+parent directory unless the '--cid-version' and '--hash' options are used.
 
 Newly created leaves will be in the legacy format (Protobuf) if the
-CID version is 0, or raw is the CID version is non-zero.  Use of the
---raw-leaves option will override this behavior.
+CID version is 0, or raw if the CID version is non-zero.  Use of the
+'--raw-leaves' option will override this behavior.
 
-If the '--flush' option is set to false, changes will not be propogated to the
+If the '--flush' option is set to false, changes will not be propagated to the
 merkledag root. This can make operations much faster when doing a large number
 of writes to a deeper directory structure.
 
 EXAMPLE:
 
-    echo "hello world" | ipfs files write --create /myfs/a/b/file
+    echo "hello world" | ipfs files write --create --parents /myfs/a/b/file
     echo "hello world" | ipfs files write --truncate /myfs/a/b/file
 
 WARNING:
@@ -695,24 +1015,55 @@ WARNING:
 Usage of the '--flush=false' option does not guarantee data durability until
 the tree has been flushed. This can be accomplished by running 'ipfs files
 stat' on the file or any of its ancestors.
+
+WARNING:
+
+The CID produced by 'files write' will be different from 'ipfs add' because
+'ipfs files write' creates a trickle-dag optimized for append-only operations.
+See '--trickle' in 'ipfs add --help' for more information.
+
+NOTE: The 'Import.UnixFSFileMaxLinks' config option does not apply to this command.
+Trickle DAG has a fixed internal structure optimized for append operations.
+To use configurable max-links, use 'ipfs add' with balanced DAG layout.
+
+If you want to add a file without modifying an existing one,
+use 'ipfs add' with '--to-files':
+
+  > ipfs files mkdir -p /myfs/dir
+  > ipfs add example.jpg --to-files /myfs/dir/
+  > ipfs files ls /myfs/dir/
+  example.jpg
+
+See '--to-files' in 'ipfs add --help' for more information.
 `,
 	},
-	Arguments: []cmdkit.Argument{
-		cmdkit.StringArg("path", true, false, "Path to write to."),
-		cmdkit.FileArg("data", true, false, "Data to write.").EnableStdin(),
+	Arguments: []cmds.Argument{
+		cmds.StringArg("path", true, false, "Path to write to."),
+		cmds.FileArg("data", true, false, "Data to write.").EnableStdin(),
 	},
-	Options: []cmdkit.Option{
-		cmdkit.Int64Option(filesOffsetOptionName, "o", "Byte offset to begin writing at."),
-		cmdkit.BoolOption(filesCreateOptionName, "e", "Create the file if it does not exist."),
-		cmdkit.BoolOption(filesParentsOptionName, "p", "Make parent directories as needed."),
-		cmdkit.BoolOption(filesTruncateOptionName, "t", "Truncate the file to size zero before writing."),
-		cmdkit.Int64Option(filesCountOptionName, "n", "Maximum number of bytes to read."),
-		cmdkit.BoolOption(filesRawLeavesOptionName, "Use raw blocks for newly created leaf nodes. (experimental)"),
+	Options: []cmds.Option{
+		cmds.Int64Option(filesOffsetOptionName, "o", "Byte offset to begin writing at."),
+		cmds.BoolOption(filesCreateOptionName, "e", "Create the file if it does not exist."),
+		cmds.BoolOption(filesParentsOptionName, "p", "Make parent directories as needed."),
+		cmds.BoolOption(filesTruncateOptionName, "t", "Truncate the file to size zero before writing."),
+		cmds.Int64Option(filesCountOptionName, "n", "Maximum number of bytes to read."),
+		cmds.BoolOption(filesRawLeavesOptionName, "Use raw blocks for newly created leaf nodes. (experimental)"),
 		cidVersionOption,
 		hashOption,
 	},
 	Run: func(req *cmds.Request, re cmds.ResponseEmitter, env cmds.Environment) (retErr error) {
 		path, err := checkPath(req.Arguments[0])
+		if err != nil {
+			return err
+		}
+
+		nd, err := cmdenv.GetNode(env)
+		if err != nil {
+			return err
+		}
+		defer mfsPinLock(nd, req.Context).Unlock(req.Context)
+
+		cfg, err := nd.Repo.Config()
 		if err != nil {
 			return err
 		}
@@ -723,12 +1074,16 @@ stat' on the file or any of its ancestors.
 		flush, _ := req.Options[filesFlushOptionName].(bool)
 		rawLeaves, rawLeavesDef := req.Options[filesRawLeavesOptionName].(bool)
 
-		prefix, err := getPrefixNew(req)
-		if err != nil {
+		if err := updateNoFlushCounter(nd, flush); err != nil {
 			return err
 		}
 
-		nd, err := cmdenv.GetNode(env)
+		if !rawLeavesDef && cfg.Import.UnixFSRawLeaves != config.Default {
+			rawLeavesDef = true
+			rawLeaves = cfg.Import.UnixFSRawLeaves.WithDefault(config.DefaultUnixFSRawLeaves)
+		}
+
+		prefix, err := getPrefix(req, &cfg.Import)
 		if err != nil {
 			return err
 		}
@@ -739,7 +1094,13 @@ stat' on the file or any of its ancestors.
 		}
 
 		if mkParents {
-			err := ensureContainingDirectoryExists(nd.FilesRoot, path, prefix)
+			maxDirLinks := int(cfg.Import.UnixFSDirectoryMaxLinks.WithDefault(config.DefaultUnixFSDirectoryMaxLinks))
+			sizeEstimationMode := cfg.Import.HAMTSizeEstimationMode()
+			err := ensureContainingDirectoryExists(nd.FilesRoot, path,
+				mfs.WithCidBuilder(prefix),
+				mfs.WithMaxLinks(maxDirLinks),
+				mfs.WithSizeEstimationMode(sizeEstimationMode),
+			)
 			if err != nil {
 				return err
 			}
@@ -753,7 +1114,7 @@ stat' on the file or any of its ancestors.
 			fi.RawLeaves = rawLeaves
 		}
 
-		wfd, err := fi.Open(mfs.Flags{Write: true, Sync: flush})
+		wfd, err := fi.Open(req.Context, mfs.Flags{Write: true, Sync: flush})
 		if err != nil {
 			return err
 		}
@@ -764,7 +1125,18 @@ stat' on the file or any of its ancestors.
 				if retErr == nil {
 					retErr = err
 				} else {
-					log.Error("files: error closing file mfs file descriptor", err)
+					flog.Error("files: error closing file mfs file descriptor", err)
+				}
+			}
+			if flush {
+				// Flush parent to clear directory cache and free memory.
+				parent := gopath.Dir(path)
+				if _, err := mfs.FlushPath(req.Context, nd.FilesRoot, parent); err != nil {
+					if retErr == nil {
+						retErr = err
+					} else {
+						flog.Error("files: flushing the parent folder", err)
+					}
 				}
 			}
 		}()
@@ -801,7 +1173,7 @@ stat' on the file or any of its ancestors.
 }
 
 var filesMkdirCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
+	Helptext: cmds.HelpText{
 		Tagline: "Make directories.",
 		ShortDescription: `
 Create the directory if it does not already exist.
@@ -818,16 +1190,22 @@ Examples:
 `,
 	},
 
-	Arguments: []cmdkit.Argument{
-		cmdkit.StringArg("path", true, false, "Path to dir to make."),
+	Arguments: []cmds.Argument{
+		cmds.StringArg("path", true, false, "Path to dir to make."),
 	},
-	Options: []cmdkit.Option{
-		cmdkit.BoolOption(filesParentsOptionName, "p", "No error if existing, make parent directories as needed."),
+	Options: []cmds.Option{
+		cmds.BoolOption(filesParentsOptionName, "p", "No error if existing, make parent directories as needed."),
 		cidVersionOption,
 		hashOption,
 	},
 	Run: func(req *cmds.Request, res cmds.ResponseEmitter, env cmds.Environment) error {
 		n, err := cmdenv.GetNode(env)
+		if err != nil {
+			return err
+		}
+		defer mfsPinLock(n, req.Context).Unlock(req.Context)
+
+		cfg, err := n.Repo.Config()
 		if err != nil {
 			return err
 		}
@@ -840,35 +1218,52 @@ Examples:
 
 		flush, _ := req.Options[filesFlushOptionName].(bool)
 
-		prefix, err := getPrefix(req)
+		if err := updateNoFlushCounter(n, flush); err != nil {
+			return err
+		}
+
+		prefix, err := getPrefix(req, &cfg.Import)
 		if err != nil {
 			return err
 		}
 		root := n.FilesRoot
 
-		err = mfs.Mkdir(root, dirtomake, mfs.MkdirOpts{
-			Mkparents:  dashp,
-			Flush:      flush,
-			CidBuilder: prefix,
-		})
+		maxDirLinks := int(cfg.Import.UnixFSDirectoryMaxLinks.WithDefault(config.DefaultUnixFSDirectoryMaxLinks))
+		sizeEstimationMode := cfg.Import.HAMTSizeEstimationMode()
+
+		err = mfs.Mkdir(root, dirtomake, mfs.MkdirOpts{Mkparents: dashp, Flush: flush},
+			mfs.WithCidBuilder(prefix),
+			mfs.WithMaxLinks(maxDirLinks),
+			mfs.WithSizeEstimationMode(sizeEstimationMode),
+		)
 
 		return err
 	},
 }
 
+type flushRes struct {
+	Cid string
+}
+
 var filesFlushCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
+	Helptext: cmds.HelpText{
 		Tagline: "Flush a given path's data to disk.",
 		ShortDescription: `
-Flush a given path to disk. This is only useful when other commands
+Flush a given path to the disk. This is only useful when other commands
 are run with the '--flush=false'.
 `,
 	},
-	Arguments: []cmdkit.Argument{
-		cmdkit.StringArg("path", false, false, "Path to flush. Default: '/'."),
+	Arguments: []cmds.Argument{
+		cmds.StringArg("path", false, false, "Path to flush. Default: '/'."),
 	},
 	Run: func(req *cmds.Request, res cmds.ResponseEmitter, env cmds.Environment) error {
 		nd, err := cmdenv.GetNode(env)
+		if err != nil {
+			return err
+		}
+		defer mfsPinLock(nd, req.Context).Unlock(req.Context)
+
+		enc, err := cmdenv.GetCidEncoder(req)
 		if err != nil {
 			return err
 		}
@@ -878,21 +1273,35 @@ are run with the '--flush=false'.
 			path = req.Arguments[0]
 		}
 
-		return mfs.FlushPath(nd.FilesRoot, path)
+		n, err := mfs.FlushPath(req.Context, nd.FilesRoot, path)
+		if err != nil {
+			return err
+		}
+
+		// Reset the counter (flush always resets)
+		noFlushOperationCounter.Store(0)
+
+		return cmds.EmitOnce(res, &flushRes{enc.Encode(n.Cid())})
 	},
+	Type: flushRes{},
 }
 
 var filesChcidCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
-		Tagline: "Change the cid version or hash function of the root node of a given path.",
+	Helptext: cmds.HelpText{
+		Tagline: "Change the CID version or hash function of the root node of a given path.",
 		ShortDescription: `
-Change the cid version or hash function of the root node of a given path.
+Change the CID version or hash function of the root node of a given path.
+
+Note: the MFS root ('/') CID format is controlled by Import.CidVersion and
+Import.HashFunction in the config and cannot be changed with this command.
+Use 'ipfs config' to modify these values instead. This command only works
+on subdirectories of the MFS root.
 `,
 	},
-	Arguments: []cmdkit.Argument{
-		cmdkit.StringArg("path", false, false, "Path to change. Default: '/'."),
+	Arguments: []cmds.Argument{
+		cmds.StringArg("path", true, false, "Path to change (must not be '/')."),
 	},
-	Options: []cmdkit.Option{
+	Options: []cmds.Option{
 		cidVersionOption,
 		hashOption,
 	},
@@ -901,24 +1310,37 @@ Change the cid version or hash function of the root node of a given path.
 		if err != nil {
 			return err
 		}
+		defer mfsPinLock(nd, req.Context).Unlock(req.Context)
 
-		path := "/"
-		if len(req.Arguments) > 0 {
-			path = req.Arguments[0]
+		path := req.Arguments[0]
+		if path == "/" {
+			return fmt.Errorf("cannot change CID format of the MFS root; " +
+				"use 'ipfs config Import.CidVersion' and 'ipfs config Import.HashFunction' instead")
 		}
 
 		flush, _ := req.Options[filesFlushOptionName].(bool)
 
-		prefix, err := getPrefix(req)
+		// Note: files chcid is for explicitly changing CID format, so we don't
+		// fall back to Import config here. If no options are provided, it does nothing.
+		prefix, err := getPrefix(req, nil)
 		if err != nil {
 			return err
 		}
 
-		err = updatePath(nd.FilesRoot, path, prefix)
-		if err == nil && flush {
-			err = mfs.FlushPath(nd.FilesRoot, path)
+		if err := updatePath(nd.FilesRoot, path, prefix); err != nil {
+			return err
 		}
-		return err
+		if flush {
+			if _, err = mfs.FlushPath(req.Context, nd.FilesRoot, path); err != nil {
+				return err
+			}
+			// Flush parent to clear directory cache and free memory.
+			parent := gopath.Dir(path)
+			if _, err = mfs.FlushPath(req.Context, nd.FilesRoot, parent); err != nil {
+				return err
+			}
+		}
+		return nil
 	},
 }
 
@@ -943,8 +1365,8 @@ func updatePath(rt *mfs.Root, pth string, builder cid.Builder) error {
 }
 
 var filesRmCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
-		Tagline: "Remove a file.",
+	Helptext: cmds.HelpText{
+		Tagline: "Remove a file from MFS.",
 		ShortDescription: `
 Remove files or directories.
 
@@ -957,150 +1379,150 @@ Remove files or directories.
 `,
 	},
 
-	Arguments: []cmdkit.Argument{
-		cmdkit.StringArg("path", true, true, "File to remove."),
+	Arguments: []cmds.Argument{
+		cmds.StringArg("path", true, true, "File to remove."),
 	},
-	Options: []cmdkit.Option{
-		cmdkit.BoolOption(recursiveOptionName, "r", "Recursively remove directories."),
-		cmdkit.BoolOption(forceOptionName, "Forcibly remove target at path; implies -r for directories"),
+	Options: []cmds.Option{
+		cmds.BoolOption(recursiveOptionName, "r", "Recursively remove directories."),
+		cmds.BoolOption(forceOptionName, "Forcibly remove target at path; implies -r for directories"),
 	},
 	Run: func(req *cmds.Request, res cmds.ResponseEmitter, env cmds.Environment) error {
+		// Check if user explicitly set --flush=false
+		if flushOpt, ok := req.Options[filesFlushOptionName]; ok {
+			if flush, ok := flushOpt.(bool); ok && !flush {
+				return fmt.Errorf("files rm always flushes for safety. The --flush flag cannot be set to false for this command")
+			}
+		}
+
 		nd, err := cmdenv.GetNode(env)
 		if err != nil {
 			return err
 		}
-
-		path, err := checkPath(req.Arguments[0])
-		if err != nil {
-			return err
-		}
-
-		if path == "/" {
-			return fmt.Errorf("cannot delete root")
-		}
-
-		// 'rm a/b/c/' will fail unless we trim the slash at the end
-		if path[len(path)-1] == '/' {
-			path = path[:len(path)-1]
-		}
-
-		dir, name := gopath.Split(path)
-		parent, err := mfs.Lookup(nd.FilesRoot, dir)
-		if err != nil {
-			return fmt.Errorf("parent lookup: %s", err)
-		}
-
-		pdir, ok := parent.(*mfs.Directory)
-		if !ok {
-			return fmt.Errorf("no such file or directory: %s", path)
-		}
-
+		defer mfsPinLock(nd, req.Context).Unlock(req.Context)
 		// if '--force' specified, it will remove anything else,
 		// including file, directory, corrupted node, etc
 		force, _ := req.Options[forceOptionName].(bool)
-		if force {
-			err := pdir.Unlink(name)
-			if err != nil {
-				return err
-			}
-
-			return pdir.Flush()
-		}
-
-		// get child node by name, when the node is corrupted and nonexistent,
-		// it will return specific error.
-		child, err := pdir.Child(name)
-		if err != nil {
-			return err
-		}
-
 		dashr, _ := req.Options[recursiveOptionName].(bool)
+		var errs []error
+		for _, arg := range req.Arguments {
+			path, err := checkPath(arg)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("%s is not a valid path: %w", arg, err))
+				continue
+			}
 
-		switch child.(type) {
-		case *mfs.Directory:
-			if !dashr {
-				return fmt.Errorf("%s is a directory, use -r to remove directories", path)
+			if err := removePath(nd.FilesRoot, path, force, dashr); err != nil {
+				errs = append(errs, fmt.Errorf("%s: %w", path, err))
 			}
 		}
-
-		err = pdir.Unlink(name)
-		if err != nil {
-			return err
+		if len(errs) > 0 {
+			for _, err = range errs {
+				e := res.Emit(err.Error())
+				if e != nil {
+					return e
+				}
+			}
+			return fmt.Errorf("can't remove some files")
 		}
-
-		return pdir.Flush()
+		return nil
 	},
 }
 
-func getPrefixNew(req *cmds.Request) (cid.Builder, error) {
+func removePath(filesRoot *mfs.Root, path string, force bool, dashr bool) error {
+	if path == "/" {
+		return fmt.Errorf("cannot delete root")
+	}
+
+	// 'rm a/b/c/' will fail unless we trim the slash at the end
+	if path[len(path)-1] == '/' {
+		path = path[:len(path)-1]
+	}
+
+	dir, name := gopath.Split(path)
+
+	pdir, err := getParentDir(filesRoot, dir)
+	if err != nil {
+		if force && err == os.ErrNotExist {
+			return nil
+		}
+		return err
+	}
+
+	if force {
+		err := pdir.Unlink(name)
+		if err != nil {
+			if err == os.ErrNotExist {
+				return nil
+			}
+			return err
+		}
+		return pdir.Flush()
+	}
+
+	// get child node by name, when the node is corrupted and nonexistent,
+	// it will return specific error.
+	child, err := pdir.Child(name)
+	if err != nil {
+		return err
+	}
+
+	switch child.(type) {
+	case *mfs.Directory:
+		if !dashr {
+			return fmt.Errorf("path is a directory, use -r to remove directories")
+		}
+	}
+
+	err = pdir.Unlink(name)
+	if err != nil {
+		return err
+	}
+
+	return pdir.Flush()
+}
+
+// getPrefix builds a cid.Builder from CLI flags, falling back to importCfg
+// when provided. Returns (nil, nil) when neither CLI nor config set a value.
+func getPrefix(req *cmds.Request, importCfg *config.Import) (cid.Builder, error) {
 	cidVer, cidVerSet := req.Options[filesCidVersionOptionName].(int)
 	hashFunStr, hashFunSet := req.Options[filesHashOptionName].(string)
 
-	if !cidVerSet && !hashFunSet {
-		return nil, nil
-	}
-
-	if hashFunSet && cidVer == 0 {
-		cidVer = 1
-	}
-
-	prefix, err := dag.PrefixForCidVersion(cidVer)
-	if err != nil {
-		return nil, err
-	}
-
-	if hashFunSet {
-		hashFunCode, ok := mh.Names[strings.ToLower(hashFunStr)]
-		if !ok {
-			return nil, fmt.Errorf("unrecognized hash function: %s", strings.ToLower(hashFunStr))
+	if cidVerSet || hashFunSet {
+		// CLI flags take precedence: build prefix from them directly.
+		if hashFunSet && cidVer == 0 {
+			cidVer = 1
 		}
-		prefix.MhType = hashFunCode
-		prefix.MhLength = -1
+		prefix, err := dag.PrefixForCidVersion(cidVer)
+		if err != nil {
+			return nil, err
+		}
+		if hashFunSet {
+			hashFunCode, ok := mh.Names[strings.ToLower(hashFunStr)]
+			if !ok {
+				return nil, fmt.Errorf("unrecognized hash function: %q", hashFunStr)
+			}
+			prefix.MhType = hashFunCode
+			prefix.MhLength = -1
+		}
+		return &prefix, nil
 	}
 
-	return &prefix, nil
+	// No CLI flags: fall back to Import config.
+	if importCfg != nil {
+		return importCfg.UnixFSCidBuilder()
+	}
+
+	return nil, nil
 }
 
-func getPrefix(req *cmds.Request) (cid.Builder, error) {
-	cidVer, cidVerSet := req.Options[filesCidVersionOptionName].(int)
-	hashFunStr, hashFunSet := req.Options[filesHashOptionName].(string)
-
-	if !cidVerSet && !hashFunSet {
-		return nil, nil
-	}
-
-	if hashFunSet && cidVer == 0 {
-		cidVer = 1
-	}
-
-	prefix, err := dag.PrefixForCidVersion(cidVer)
-	if err != nil {
-		return nil, err
-	}
-
-	if hashFunSet {
-		hashFunCode, ok := mh.Names[strings.ToLower(hashFunStr)]
-		if !ok {
-			return nil, fmt.Errorf("unrecognized hash function: %s", strings.ToLower(hashFunStr))
-		}
-		prefix.MhType = hashFunCode
-		prefix.MhLength = -1
-	}
-
-	return &prefix, nil
-}
-
-func ensureContainingDirectoryExists(r *mfs.Root, path string, builder cid.Builder) error {
+func ensureContainingDirectoryExists(r *mfs.Root, path string, opts ...mfs.Option) error {
 	dirtomake := gopath.Dir(path)
 
 	if dirtomake == "/" {
 		return nil
 	}
 
-	return mfs.Mkdir(r, dirtomake, mfs.MkdirOpts{
-		Mkparents:  true,
-		CidBuilder: builder,
-	})
+	return mfs.Mkdir(r, dirtomake, mfs.MkdirOpts{Mkparents: true}, opts...)
 }
 
 func getFileHandle(r *mfs.Root, path string, create bool, builder cid.Builder) (*mfs.File, error) {
@@ -1118,23 +1540,22 @@ func getFileHandle(r *mfs.Root, path string, create bool, builder cid.Builder) (
 			return nil, err
 		}
 
-		// if create is specified and the file doesnt exist, we create the file
+		// if create is specified and the file doesn't exist, we create the file
 		dirname, fname := gopath.Split(path)
-		pdiri, err := mfs.Lookup(r, dirname)
+		pdir, err := getParentDir(r, dirname)
 		if err != nil {
-			flog.Error("lookupfail ", dirname)
 			return nil, err
 		}
-		pdir, ok := pdiri.(*mfs.Directory)
-		if !ok {
-			return nil, fmt.Errorf("%s was not a directory", dirname)
-		}
+
 		if builder == nil {
 			builder = pdir.GetCidBuilder()
 		}
 
 		nd := dag.NodeWithData(ft.FilePBData(nil, 0))
-		nd.SetCidBuilder(builder)
+		err = nd.SetCidBuilder(builder)
+		if err != nil {
+			return nil, err
+		}
 		err = pdir.AddChild(fname, nd)
 		if err != nil {
 			return nil, err
@@ -1147,7 +1568,7 @@ func getFileHandle(r *mfs.Root, path string, create bool, builder cid.Builder) (
 
 		fi, ok := fsn.(*mfs.File)
 		if !ok {
-			return nil, errors.New("expected *mfs.File, didnt get it. This is likely a race condition")
+			return nil, errors.New("expected *mfs.File, didn't get it. This is likely a race condition")
 		}
 		return fi, nil
 
@@ -1170,4 +1591,246 @@ func checkPath(p string) (string, error) {
 		cleaned += "/"
 	}
 	return cleaned, nil
+}
+
+func getParentDir(root *mfs.Root, dir string) (*mfs.Directory, error) {
+	parent, err := mfs.Lookup(root, dir)
+	if err != nil {
+		return nil, err
+	}
+
+	pdir, ok := parent.(*mfs.Directory)
+	if !ok {
+		return nil, errors.New("expected *mfs.Directory, didn't get it. This is likely a race condition")
+	}
+	return pdir, nil
+}
+
+var filesChmodCmd = &cmds.Command{
+	Status: cmds.Experimental,
+	Helptext: cmds.HelpText{
+		Tagline: "Change optional POSIX mode permissions",
+		ShortDescription: `
+The mode argument must be specified in Unix numeric notation.
+
+    $ ipfs files chmod 0644 /foo
+    $ ipfs files stat /foo
+    ...
+    Type: file
+    Mode: -rw-r--r-- (0644)
+    ...
+`,
+	},
+	Arguments: []cmds.Argument{
+		cmds.StringArg("mode", true, false, "Mode to apply to node (numeric notation)"),
+		cmds.StringArg("path", true, false, "Path to apply mode"),
+	},
+	Run: func(req *cmds.Request, res cmds.ResponseEmitter, env cmds.Environment) error {
+		nd, err := cmdenv.GetNode(env)
+		if err != nil {
+			return err
+		}
+		defer mfsPinLock(nd, req.Context).Unlock(req.Context)
+
+		path, err := checkPath(req.Arguments[1])
+		if err != nil {
+			return err
+		}
+
+		mode, err := strconv.ParseInt(req.Arguments[0], 8, 32)
+		if err != nil {
+			return err
+		}
+
+		return mfs.Chmod(nd.FilesRoot, path, os.FileMode(mode))
+	},
+}
+
+var filesTouchCmd = &cmds.Command{
+	Status: cmds.Experimental,
+	Helptext: cmds.HelpText{
+		Tagline: "Set or change optional POSIX modification times.",
+		ShortDescription: `
+Examples:
+    # set modification time to now.
+    $ ipfs files touch /foo
+    # set a custom modification time.
+    $ ipfs files touch --mtime=1630937926 /foo
+`,
+	},
+	Arguments: []cmds.Argument{
+		cmds.StringArg("path", true, false, "Path of target to update."),
+	},
+	Options: []cmds.Option{
+		cmds.Int64Option(mtimeOptionName, "Modification time in seconds before or since the Unix Epoch to apply to created UnixFS entries."),
+		cmds.UintOption(mtimeNsecsOptionName, "Modification time fraction in nanoseconds"),
+	},
+	Run: func(req *cmds.Request, res cmds.ResponseEmitter, env cmds.Environment) error {
+		nd, err := cmdenv.GetNode(env)
+		if err != nil {
+			return err
+		}
+		defer mfsPinLock(nd, req.Context).Unlock(req.Context)
+
+		path, err := checkPath(req.Arguments[0])
+		if err != nil {
+			return err
+		}
+
+		mtime, _ := req.Options[mtimeOptionName].(int64)
+		nsecs, _ := req.Options[mtimeNsecsOptionName].(uint)
+
+		var ts time.Time
+		if mtime != 0 {
+			ts = time.Unix(mtime, int64(nsecs)).UTC()
+		} else {
+			ts = time.Now().UTC()
+		}
+
+		return mfs.Touch(nd.FilesRoot, path, ts)
+	},
+}
+
+const chrootConfirmOptionName = "confirm"
+
+var filesChrootCmd = &cmds.Command{
+	Status: cmds.Experimental,
+	Helptext: cmds.HelpText{
+		Tagline: "Change the MFS root CID.",
+		ShortDescription: `
+'ipfs files chroot' changes the root CID used by MFS (Mutable File System).
+This is a recovery command for when MFS becomes corrupted and prevents the
+daemon from starting.
+
+When run without a CID argument, resets MFS to an empty directory.
+
+WARNING: The old MFS root and its unpinned children will be removed during
+the next garbage collection. Pin the old root first if you want to preserve.
+
+This command can only run when the daemon is not running.
+
+Examples:
+
+  # Reset MFS to empty directory (recovery from corruption)
+  $ ipfs files chroot --confirm
+
+  # Restore MFS to a known good directory CID
+  $ ipfs files chroot --confirm QmYourBackupCID
+`,
+	},
+	Arguments: []cmds.Argument{
+		cmds.StringArg("cid", false, false, "New root CID (defaults to empty directory if not specified)."),
+	},
+	Options: []cmds.Option{
+		cmds.BoolOption(chrootConfirmOptionName, "Confirm this potentially destructive operation."),
+	},
+	NoRemote: true,
+	Extra:    CreateCmdExtras(SetDoesNotUseRepo(true)),
+	Run: func(req *cmds.Request, res cmds.ResponseEmitter, env cmds.Environment) error {
+		confirm, _ := req.Options[chrootConfirmOptionName].(bool)
+		if !confirm {
+			return errors.New("this is a potentially destructive operation; pass --confirm to proceed")
+		}
+
+		enc, err := cmdenv.GetCidEncoder(req)
+		if err != nil {
+			return err
+		}
+
+		// Determine new root CID
+		var newRootCid cid.Cid
+		if len(req.Arguments) > 0 {
+			var err error
+			newRootCid, err = cmdutils.CidFromArg(req.Arguments[0])
+			if err != nil {
+				return fmt.Errorf("invalid CID %q: %w", req.Arguments[0], err)
+			}
+		} else {
+			// Default to empty directory
+			newRootCid = ft.EmptyDirNode().Cid()
+		}
+
+		// Get config root to open repo directly
+		cctx := env.(*oldcmds.Context)
+		cfgRoot := cctx.ConfigRoot
+
+		// Open repo directly (daemon must not be running)
+		repo, err := fsrepo.Open(cfgRoot)
+		if err != nil {
+			return fmt.Errorf("opening repo (is the daemon running?): %w", err)
+		}
+		defer repo.Close()
+
+		localDS := repo.Datastore()
+		bs := bstore.NewBlockstore(localDS)
+
+		// Check new root exists locally and is a directory
+		hasBlock, err := bs.Has(req.Context, newRootCid)
+		if err != nil {
+			return fmt.Errorf("checking if new root exists: %w", err)
+		}
+		if !hasBlock {
+			// Special case: empty dir is always available (hardcoded in boxo)
+			emptyDirCid := ft.EmptyDirNode().Cid()
+			if !newRootCid.Equals(emptyDirCid) {
+				return fmt.Errorf("new root %s does not exist locally; fetch it first with 'ipfs block get'", enc.Encode(newRootCid))
+			}
+		}
+
+		// Validate it's a directory (not a file)
+		if hasBlock {
+			blk, err := bs.Get(req.Context, newRootCid)
+			if err != nil {
+				return fmt.Errorf("reading new root block: %w", err)
+			}
+			pbNode, err := dag.DecodeProtobuf(blk.RawData())
+			if err != nil {
+				return fmt.Errorf("new root is not a valid dag-pb node: %w", err)
+			}
+			fsNode, err := ft.FSNodeFromBytes(pbNode.Data())
+			if err != nil {
+				return fmt.Errorf("new root is not a valid UnixFS node: %w", err)
+			}
+			if fsNode.Type() != ft.TDirectory && fsNode.Type() != ft.THAMTShard {
+				return fmt.Errorf("new root must be a directory, got %s", fsNode.Type())
+			}
+		}
+
+		// Get old root for display (if exists)
+		var oldRootStr string
+		oldRootBytes, err := localDS.Get(req.Context, node.FilesRootDatastoreKey)
+		if err == nil {
+			oldRootCid, err := cid.Cast(oldRootBytes)
+			if err == nil {
+				oldRootStr = enc.Encode(oldRootCid)
+			}
+		} else if !errors.Is(err, datastore.ErrNotFound) {
+			return fmt.Errorf("reading current MFS root: %w", err)
+		}
+
+		// Write new root
+		err = localDS.Put(req.Context, node.FilesRootDatastoreKey, newRootCid.Bytes())
+		if err != nil {
+			return fmt.Errorf("writing new MFS root: %w", err)
+		}
+
+		// Build output message
+		newRootStr := enc.Encode(newRootCid)
+		var msg string
+		if oldRootStr != "" {
+			msg = fmt.Sprintf("MFS root changed from %s to %s\n", oldRootStr, newRootStr)
+			msg += fmt.Sprintf("The old root %s will be garbage collected unless pinned.\n", oldRootStr)
+		} else {
+			msg = fmt.Sprintf("MFS root set to %s\n", newRootStr)
+		}
+
+		return cmds.EmitOnce(res, &MessageOutput{Message: msg})
+	},
+	Type: MessageOutput{},
+	Encoders: cmds.EncoderMap{
+		cmds.Text: cmds.MakeTypedEncoder(func(req *cmds.Request, w io.Writer, out *MessageOutput) error {
+			_, err := fmt.Fprint(w, out.Message)
+			return err
+		}),
+	},
 }

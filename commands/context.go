@@ -6,29 +6,25 @@ import (
 	"strings"
 	"time"
 
-	core "github.com/ipfs/go-ipfs/core"
-	coreapi "github.com/ipfs/go-ipfs/core/coreapi"
-	coreiface "github.com/ipfs/go-ipfs/core/coreapi/interface"
-	options "github.com/ipfs/go-ipfs/core/coreapi/interface/options"
-	loader "github.com/ipfs/go-ipfs/plugin/loader"
+	core "github.com/ipfs/kubo/core"
+	coreapi "github.com/ipfs/kubo/core/coreapi"
+	loader "github.com/ipfs/kubo/plugin/loader"
 
-	"gx/ipfs/QmR77mMvvh8mJBBWQmBfQBu8oD38NUN4KE9SL2gDgAQNc6/go-ipfs-cmds"
-	config "gx/ipfs/QmTbcMKv6GU3fxhnNcbzYChdox9Fdd7VpucM3PQ7UWjX3D/go-ipfs-config"
-	logging "gx/ipfs/QmcuXC5cxs79ro2cUuHs4HQ2bkDLJUYokwL8aivcX6HW3C/go-log"
+	cmds "github.com/ipfs/go-ipfs-cmds"
+	logging "github.com/ipfs/go-log/v2"
+	config "github.com/ipfs/kubo/config"
+	coreiface "github.com/ipfs/kubo/core/coreiface"
+	options "github.com/ipfs/kubo/core/coreiface/options"
 )
 
 var log = logging.Logger("command")
 
-// Context represents request context
+// Context represents request context.
 type Context struct {
-	Online     bool
 	ConfigRoot string
 	ReqLog     *ReqLog
 
 	Plugins *loader.PluginLoader
-
-	config     *config.Config
-	LoadConfig func(path string) (*config.Config, error)
 
 	Gateway       bool
 	api           coreiface.CoreAPI
@@ -36,17 +32,12 @@ type Context struct {
 	ConstructNode func() (*core.IpfsNode, error)
 }
 
-// GetConfig returns the config of the current Command execution
-// context. It may load it with the provided function.
 func (c *Context) GetConfig() (*config.Config, error) {
-	var err error
-	if c.config == nil {
-		if c.LoadConfig == nil {
-			return nil, errors.New("nil LoadConfig function")
-		}
-		c.config, err = c.LoadConfig(c.ConfigRoot)
+	node, err := c.GetNode()
+	if err != nil {
+		return nil, err
 	}
-	return c.config, err
+	return node.Repo.Config()
 }
 
 // GetNode returns the node of the current Command execution
@@ -62,8 +53,25 @@ func (c *Context) GetNode() (*core.IpfsNode, error) {
 	return c.node, err
 }
 
+// ClearCachedNode clears any cached node, forcing GetNode to construct a new one.
+//
+// This method is critical for mitigating racy FX dependency injection behavior
+// that can occur during daemon startup. The daemon may create multiple IpfsNode
+// instances during initialization - first an offline node during early init, then
+// the proper online daemon node. Without clearing the cache, HTTP RPC handlers may
+// end up using the first (offline) cached node instead of the intended online daemon node.
+//
+// This behavior was likely present forever in go-ipfs, but recent changes made it more
+// prominent and forced us to proactively mitigate FX shortcomings. The daemon calls
+// this method immediately before setting its ConstructNode function to ensure that
+// subsequent GetNode() calls use the correct online daemon node rather than any
+// stale cached offline node from initialization.
+func (c *Context) ClearCachedNode() {
+	c.node = nil
+}
+
 // GetAPI returns CoreAPI instance backed by ipfs node.
-// It may construct the node with the provided function
+// It may construct the node with the provided function.
 func (c *Context) GetAPI() (coreiface.CoreAPI, error) {
 	if c.api == nil {
 		n, err := c.GetNode()
@@ -108,7 +116,6 @@ func (c *Context) LogRequest(req *cmds.Request) func() {
 		Command:   strings.Join(req.Path, "/"),
 		Options:   req.Options,
 		Args:      req.Arguments,
-		ID:        c.ReqLog.nextID,
 		log:       c.ReqLog,
 	}
 	c.ReqLog.AddEntry(rle)

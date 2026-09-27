@@ -6,44 +6,42 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 
-	core "github.com/ipfs/go-ipfs/core"
-	cmdenv "github.com/ipfs/go-ipfs/core/commands/cmdenv"
+	version "github.com/ipfs/kubo"
+	"github.com/ipfs/kubo/core"
+	"github.com/ipfs/kubo/core/commands/cmdenv"
+	"github.com/ipfs/kubo/core/commands/cmdutils"
 
-	ic "gx/ipfs/QmNiJiXwWE3kRhZrC5ej3kSjWHm337pYfhjLGSCDNKJP2s/go-libp2p-crypto"
-	"gx/ipfs/QmPJxxDsX2UbchSHobbYuvz7qnyJTFKvaKMzE2rZWJ4x5B/go-libp2p-peer"
-	pstore "gx/ipfs/QmQFFp4ntkd4C14sP3FaH9WJyBuetuGUVo6dShNHvnoEvC/go-libp2p-peerstore"
-	cmds "gx/ipfs/QmR77mMvvh8mJBBWQmBfQBu8oD38NUN4KE9SL2gDgAQNc6/go-ipfs-cmds"
-	identify "gx/ipfs/QmSgtf5vHyugoxcwMbyNy6bZ9qPDDTJSYEED2GkWjLwitZ/go-libp2p/p2p/protocol/identify"
-	kb "gx/ipfs/QmWNfpvvoMom3j19zgvSh1VMxNuHbLDXTPkxUf8Gpju5H7/go-libp2p-kbucket"
-	"gx/ipfs/Qmde5VP1qUkyQXKCfmEUA7bP64V2HAptbJ7phuPp7jXWwg/go-ipfs-cmdkit"
+	cmds "github.com/ipfs/go-ipfs-cmds"
+	ke "github.com/ipfs/kubo/core/commands/keyencode"
+	kb "github.com/libp2p/go-libp2p-kbucket"
+	ic "github.com/libp2p/go-libp2p/core/crypto"
+	"github.com/libp2p/go-libp2p/core/host"
+	"github.com/libp2p/go-libp2p/core/peer"
+	pstore "github.com/libp2p/go-libp2p/core/peerstore"
+	"github.com/libp2p/go-libp2p/core/protocol"
 )
 
-const offlineIdErrorMessage = `'ipfs id' currently cannot query information on remote
-peers without a running daemon; we are working to fix this.
-In the meantime, if you want to query remote peers using 'ipfs id',
-please run the daemon:
+const offlineIDErrorMessage = "'ipfs id' cannot query information on remote peers without a running daemon; if you only want to convert --peerid-base, pass --offline option"
 
-    ipfs daemon &
-    ipfs id QmaCpDMGvV2BGHeYERUEnRQAwe3N8SzbUtfsmvsqQLuvuJ
-`
-
-type IdOutput struct {
-	ID              string
-	PublicKey       string
-	Addresses       []string
-	AgentVersion    string
-	ProtocolVersion string
+type IdOutput struct { // nolint
+	ID           string
+	PublicKey    string
+	Addresses    []string
+	AgentVersion string
+	Protocols    []protocol.ID
 }
 
 const (
-	formatOptionName = "format"
+	formatOptionName   = "format"
+	idFormatOptionName = "peerid-base"
 )
 
 var IDCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
-		Tagline: "Show ipfs node id info.",
+	Helptext: cmds.HelpText{
+		Tagline: "Show IPFS node id info.",
 		ShortDescription: `
 Prints out information about the specified peer.
 If no peer is specified, prints out information for local peers.
@@ -54,19 +52,26 @@ If no peer is specified, prints out information for local peers.
 <pver>: Protocol version.
 <pubkey>: Public key.
 <addrs>: Addresses (newline delimited).
+<protocols>: Libp2p Protocol registrations (newline delimited).
 
 EXAMPLE:
 
     ipfs id Qmece2RkXhsKe5CRooNisBTh4SK119KrXXGmoK6V3kb8aH -f="<addrs>\n"
 `,
 	},
-	Arguments: []cmdkit.Argument{
-		cmdkit.StringArg("peerid", false, false, "Peer.ID of node to look up."),
+	Arguments: []cmds.Argument{
+		cmds.StringArg("peerid", false, false, "Peer.ID of node to look up."),
 	},
-	Options: []cmdkit.Option{
-		cmdkit.StringOption(formatOptionName, "f", "Optional output format."),
+	Options: []cmds.Option{
+		cmds.StringOption(formatOptionName, "f", "Optional output format."),
+		cmds.StringOption(idFormatOptionName, "Encoding used for peer IDs: Can either be a multibase encoded CID or a base58btc encoded multihash. Takes {b58mh|base36|k|base32|b...}.").WithDefault("b58mh"),
 	},
 	Run: func(req *cmds.Request, res cmds.ResponseEmitter, env cmds.Environment) error {
+		keyEnc, err := ke.KeyEncoderFromString(req.Options[idFormatOptionName].(string))
+		if err != nil {
+			return err
+		}
+
 		n, err := cmdenv.GetNode(env)
 		if err != nil {
 			return err
@@ -75,36 +80,40 @@ EXAMPLE:
 		var id peer.ID
 		if len(req.Arguments) > 0 {
 			var err error
-			id, err = peer.IDB58Decode(req.Arguments[0])
+			id, err = peer.Decode(req.Arguments[0])
 			if err != nil {
-				return fmt.Errorf("invalid peer id")
+				return errors.New("invalid peer id")
 			}
 		} else {
 			id = n.Identity
 		}
 
 		if id == n.Identity {
-			output, err := printSelf(n)
+			output, err := printSelf(keyEnc, n)
 			if err != nil {
 				return err
 			}
 			return cmds.EmitOnce(res, output)
 		}
 
-		// TODO handle offline mode with polymorphism instead of conditionals
-		if !n.OnlineMode() {
-			return errors.New(offlineIdErrorMessage)
+		offline, _ := req.Options[OfflineOption].(bool)
+		if !offline && !n.IsOnline {
+			return errors.New(offlineIDErrorMessage)
 		}
 
-		p, err := n.Routing.FindPeer(req.Context, id)
-		if err == kb.ErrLookupFailure {
-			return errors.New(offlineIdErrorMessage)
-		}
-		if err != nil {
-			return err
+		if !offline {
+			// We need to actually connect to run identify.
+			err = n.PeerHost.Connect(req.Context, peer.AddrInfo{ID: id})
+			switch err {
+			case nil:
+			case kb.ErrLookupFailure:
+				return errors.New(offlineIDErrorMessage)
+			default:
+				return err
+			}
 		}
 
-		output, err := printPeer(n.Peerstore, p.ID)
+		output, err := printPeer(keyEnc, n.Peerstore, id)
 		if err != nil {
 			return err
 		}
@@ -117,9 +126,9 @@ EXAMPLE:
 				output := format
 				output = strings.Replace(output, "<id>", out.ID, -1)
 				output = strings.Replace(output, "<aver>", out.AgentVersion, -1)
-				output = strings.Replace(output, "<pver>", out.ProtocolVersion, -1)
 				output = strings.Replace(output, "<pubkey>", out.PublicKey, -1)
 				output = strings.Replace(output, "<addrs>", strings.Join(out.Addresses, "\n"), -1)
+				output = strings.Replace(output, "<protocols>", strings.Join(protocol.ConvertToStrings(out.Protocols), "\n"), -1)
 				output = strings.Replace(output, "\\n", "\n", -1)
 				output = strings.Replace(output, "\\t", "\t", -1)
 				fmt.Fprint(w, output)
@@ -137,13 +146,13 @@ EXAMPLE:
 	Type: IdOutput{},
 }
 
-func printPeer(ps pstore.Peerstore, p peer.ID) (interface{}, error) {
+func printPeer(keyEnc ke.KeyEncoder, ps pstore.Peerstore, p peer.ID) (any, error) {
 	if p == "" {
 		return nil, errors.New("attempted to print nil peer")
 	}
 
 	info := new(IdOutput)
-	info.ID = p.Pretty()
+	info.ID = keyEnc.FormatID(p)
 
 	if pk := ps.PubKey(p); pk != nil {
 		pkb, err := ic.MarshalPublicKey(pk)
@@ -153,18 +162,26 @@ func printPeer(ps pstore.Peerstore, p peer.ID) (interface{}, error) {
 		info.PublicKey = base64.StdEncoding.EncodeToString(pkb)
 	}
 
-	for _, a := range ps.Addrs(p) {
-		info.Addresses = append(info.Addresses, a.String())
+	addrInfo := ps.PeerInfo(p)
+	addrs, err := peer.AddrInfoToP2pAddrs(&addrInfo)
+	if err != nil {
+		return nil, err
 	}
 
-	if v, err := ps.Get(p, "ProtocolVersion"); err == nil {
-		if vs, ok := v.(string); ok {
-			info.ProtocolVersion = vs
-		}
+	for _, a := range addrs {
+		info.Addresses = append(info.Addresses, a.String())
 	}
+	slices.Sort(info.Addresses)
+
+	protocols, _ := ps.GetProtocols(p) // don't care about errors here.
+	for _, proto := range protocols {
+		info.Protocols = append(info.Protocols, protocol.ID(cmdutils.CleanAndTrim(string(proto))))
+	}
+	slices.Sort(info.Protocols)
+
 	if v, err := ps.Get(p, "AgentVersion"); err == nil {
 		if vs, ok := v.(string); ok {
-			info.AgentVersion = vs
+			info.AgentVersion = cmdutils.CleanAndTrim(vs)
 		}
 	}
 
@@ -172,9 +189,9 @@ func printPeer(ps pstore.Peerstore, p peer.ID) (interface{}, error) {
 }
 
 // printing self is special cased as we get values differently.
-func printSelf(node *core.IpfsNode) (interface{}, error) {
+func printSelf(keyEnc ke.KeyEncoder, node *core.IpfsNode) (any, error) {
 	info := new(IdOutput)
-	info.ID = node.Identity.Pretty()
+	info.ID = keyEnc.FormatID(node.Identity)
 
 	pk := node.PrivateKey.GetPublic()
 	pkb, err := ic.MarshalPublicKey(pk)
@@ -184,12 +201,17 @@ func printSelf(node *core.IpfsNode) (interface{}, error) {
 	info.PublicKey = base64.StdEncoding.EncodeToString(pkb)
 
 	if node.PeerHost != nil {
-		for _, a := range node.PeerHost.Addrs() {
-			s := a.String() + "/ipfs/" + info.ID
-			info.Addresses = append(info.Addresses, s)
+		addrs, err := peer.AddrInfoToP2pAddrs(host.InfoFromHost(node.PeerHost))
+		if err != nil {
+			return nil, err
 		}
+		for _, a := range addrs {
+			info.Addresses = append(info.Addresses, a.String())
+		}
+		slices.Sort(info.Addresses)
+		info.Protocols = node.PeerHost.Mux().Protocols()
+		slices.Sort(info.Protocols)
 	}
-	info.ProtocolVersion = identify.LibP2PVersion
-	info.AgentVersion = identify.ClientVersion
+	info.AgentVersion = version.GetUserAgentVersion()
 	return info, nil
 }

@@ -7,17 +7,15 @@ import (
 	"strings"
 	"time"
 
-	cmdenv "github.com/ipfs/go-ipfs/core/commands/cmdenv"
-	ncmd "github.com/ipfs/go-ipfs/core/commands/name"
-	coreiface "github.com/ipfs/go-ipfs/core/coreapi/interface"
-	options "github.com/ipfs/go-ipfs/core/coreapi/interface/options"
-	nsopts "github.com/ipfs/go-ipfs/core/coreapi/interface/options/namesys"
-	ns "github.com/ipfs/go-ipfs/namesys"
-	path "gx/ipfs/QmQ3YSqfxunT5QBg6KBVskKyRE26q6hjSMyhpxchpm7jEN/go-path"
+	ns "github.com/ipfs/boxo/namesys"
+	cidenc "github.com/ipfs/go-cidutil/cidenc"
+	cmdenv "github.com/ipfs/kubo/core/commands/cmdenv"
+	"github.com/ipfs/kubo/core/commands/cmdutils"
+	ncmd "github.com/ipfs/kubo/core/commands/name"
 
-	cmds "gx/ipfs/QmR77mMvvh8mJBBWQmBfQBu8oD38NUN4KE9SL2gDgAQNc6/go-ipfs-cmds"
-	cidenc "gx/ipfs/QmdPQx9fvN5ExVwMhRmh7YpCQJzJrFhd1AjVBwJmRMFJeX/go-cidutil/cidenc"
-	cmdkit "gx/ipfs/Qmde5VP1qUkyQXKCfmEUA7bP64V2HAptbJ7phuPp7jXWwg/go-ipfs-cmdkit"
+	"github.com/ipfs/boxo/path"
+	cmds "github.com/ipfs/go-ipfs-cmds"
+	options "github.com/ipfs/kubo/core/coreiface/options"
 )
 
 const (
@@ -27,7 +25,7 @@ const (
 )
 
 var ResolveCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
+	Helptext: cmds.HelpText{
 		Tagline: "Resolve the value of names to IPFS.",
 		ShortDescription: `
 There are a number of mutable name protocols that can link among
@@ -66,13 +64,13 @@ Resolve the value of an IPFS DAG path:
 `,
 	},
 
-	Arguments: []cmdkit.Argument{
-		cmdkit.StringArg("name", true, false, "The name to resolve.").EnableStdin(),
+	Arguments: []cmds.Argument{
+		cmds.StringArg("name", true, false, "The name to resolve.").EnableStdin(),
 	},
-	Options: []cmdkit.Option{
-		cmdkit.BoolOption(resolveRecursiveOptionName, "r", "Resolve until the result is an IPFS name."),
-		cmdkit.IntOption(resolveDhtRecordCountOptionName, "dhtrc", "Number of records to request for DHT resolution."),
-		cmdkit.StringOption(resolveDhtTimeoutOptionName, "dhtt", "Max time to collect values during DHT resolution eg \"30s\". Pass 0 for no timeout."),
+	Options: []cmds.Option{
+		cmds.BoolOption(resolveRecursiveOptionName, "r", "Resolve until the result is an IPFS name.").WithDefault(true),
+		cmds.IntOption(resolveDhtRecordCountOptionName, "dhtrc", "Number of records to request for DHT resolution."),
+		cmds.StringOption(resolveDhtTimeoutOptionName, "dhtt", "Max time to collect values during DHT resolution e.g. \"30s\". Pass 0 for no timeout."),
 	},
 	Run: func(req *cmds.Request, res cmds.ResponseEmitter, env cmds.Environment) error {
 		api, err := cmdenv.GetApi(env, req)
@@ -83,9 +81,44 @@ Resolve the value of an IPFS DAG path:
 		name := req.Arguments[0]
 		recursive, _ := req.Options[resolveRecursiveOptionName].(bool)
 
+		// Accept native IPFS URIs (ipfs://cid, ipns://name) by rewriting them to
+		// their canonical content-path form before the namespace checks below.
+		if p, err := path.NewPathFromURI(name); err == nil {
+			name = p.String()
+		}
+
+		// the case when ipns is resolved step by step
+		if strings.HasPrefix(name, "/ipns/") && !recursive {
+			rc, rcok := req.Options[resolveDhtRecordCountOptionName].(uint)
+			dhtt, dhttok := req.Options[resolveDhtTimeoutOptionName].(string)
+			ropts := []options.NameResolveOption{
+				options.Name.ResolveOption(ns.ResolveWithDepth(1)),
+			}
+
+			if rcok {
+				ropts = append(ropts, options.Name.ResolveOption(ns.ResolveWithDhtRecordCount(rc)))
+			}
+			if dhttok {
+				d, err := time.ParseDuration(dhtt)
+				if err != nil {
+					return err
+				}
+				if d < 0 {
+					return errors.New("DHT timeout value must be >= 0")
+				}
+				ropts = append(ropts, options.Name.ResolveOption(ns.ResolveWithDhtTimeout(d)))
+			}
+			p, err := api.Name().Resolve(req.Context, name, ropts...)
+			// ErrResolveRecursion is fine
+			if err != nil && err != ns.ErrResolveRecursion {
+				return err
+			}
+			return cmds.EmitOnce(res, &ncmd.ResolvedPath{Path: p.String()})
+		}
+
 		var enc cidenc.Encoder
 		switch {
-		case !cmdenv.CidBaseDefined(req):
+		case !cmdenv.CidBaseDefined(req) && !strings.HasPrefix(name, "/ipns/"):
 			// Not specified, check the path.
 			enc, err = cmdenv.CidEncoderFromPath(name)
 			if err == nil {
@@ -100,57 +133,34 @@ Resolve the value of an IPFS DAG path:
 			}
 		}
 
-		// the case when ipns is resolved step by step
-		if strings.HasPrefix(name, "/ipns/") && !recursive {
-			rc, rcok := req.Options[resolveDhtRecordCountOptionName].(uint)
-			dhtt, dhttok := req.Options[resolveDhtTimeoutOptionName].(string)
-			ropts := []options.NameResolveOption{
-				options.Name.ResolveOption(nsopts.Depth(1)),
-			}
-
-			if rcok {
-				ropts = append(ropts, options.Name.ResolveOption(nsopts.DhtRecordCount(rc)))
-			}
-			if dhttok {
-				d, err := time.ParseDuration(dhtt)
-				if err != nil {
-					return err
-				}
-				if d < 0 {
-					return errors.New("DHT timeout value must be >= 0")
-				}
-				ropts = append(ropts, options.Name.ResolveOption(nsopts.DhtTimeout(d)))
-			}
-			p, err := api.Name().Resolve(req.Context, name, ropts...)
-			// ErrResolveRecursion is fine
-			if err != nil && err != ns.ErrResolveRecursion {
-				return err
-			}
-			return cmds.EmitOnce(res, &ncmd.ResolvedPath{Path: path.Path(p.String())})
+		p, err := cmdutils.PathOrCidPath(name)
+		if err != nil {
+			return err
 		}
 
 		// else, ipfs path or ipns with recursive flag
-		p, err := coreiface.ParsePath(name)
+		rp, remainder, err := api.ResolvePath(req.Context, p)
 		if err != nil {
 			return err
 		}
 
-		rp, err := api.ResolvePath(req.Context, p)
+		// Trick to encode path with correct encoding.
+		encodedPath := "/" + rp.Namespace() + "/" + enc.Encode(rp.RootCid())
+		if len(remainder) != 0 {
+			encodedPath += path.SegmentsToString(remainder...)
+		}
+
+		// Ensure valid and sanitized.
+		ep, err := path.NewPath(encodedPath)
 		if err != nil {
 			return err
 		}
 
-		if rp.Remainder() != "" {
-			// TODO: js expects this error. Instead of fixing this
-			// error, we should fix #5703.
-			return fmt.Errorf("found non-link at given path")
-		}
-
-		return cmds.EmitOnce(res, &ncmd.ResolvedPath{Path: path.Path("/" + rp.Namespace() + "/" + enc.Encode(rp.Cid()))})
+		return cmds.EmitOnce(res, &ncmd.ResolvedPath{Path: ep.String()})
 	},
 	Encoders: cmds.EncoderMap{
 		cmds.Text: cmds.MakeTypedEncoder(func(req *cmds.Request, w io.Writer, rp *ncmd.ResolvedPath) error {
-			fmt.Fprintln(w, rp.Path.String())
+			fmt.Fprintln(w, rp.Path)
 			return nil
 		}),
 	},

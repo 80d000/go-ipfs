@@ -1,62 +1,64 @@
 package verifbs
 
 import (
-	cid "gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
-	bstore "gx/ipfs/QmS2aqUZLJp8kF1ihE5rvDGE5LvmKDPnx32w9Z1BW9xLV5/go-ipfs-blockstore"
-	blocks "gx/ipfs/QmWoXtvgC8inqFkAATB7cp2Dax7XBi9VDvSg9RCCZufmRk/go-block-format"
-	"gx/ipfs/QmYMQuypUbgsdNHmuCBSUJV6wdQVsBHRivNAp3efHJwZJD/go-verifcid"
+	"context"
+
+	bstore "github.com/ipfs/boxo/blockstore"
+	"github.com/ipfs/boxo/verifcid"
+	blocks "github.com/ipfs/go-block-format"
+	cid "github.com/ipfs/go-cid"
 )
 
 type VerifBSGC struct {
 	bstore.GCBlockstore
 }
 
-func (bs *VerifBSGC) Put(b blocks.Block) error {
-	if err := verifcid.ValidateCid(b.Cid()); err != nil {
+func (bs *VerifBSGC) Put(ctx context.Context, b blocks.Block) error {
+	if err := verifcid.ValidateCid(verifcid.DefaultAllowlist, b.Cid()); err != nil {
 		return err
 	}
-	return bs.GCBlockstore.Put(b)
+	return bs.GCBlockstore.Put(ctx, b)
 }
 
-func (bs *VerifBSGC) PutMany(blks []blocks.Block) error {
+func (bs *VerifBSGC) PutMany(ctx context.Context, blks []blocks.Block) error {
 	for _, b := range blks {
-		if err := verifcid.ValidateCid(b.Cid()); err != nil {
+		if err := verifcid.ValidateCid(verifcid.DefaultAllowlist, b.Cid()); err != nil {
 			return err
 		}
 	}
-	return bs.GCBlockstore.PutMany(blks)
+	return bs.GCBlockstore.PutMany(ctx, blks)
 }
 
-func (bs *VerifBSGC) Get(c cid.Cid) (blocks.Block, error) {
-	if err := verifcid.ValidateCid(c); err != nil {
+func (bs *VerifBSGC) Get(ctx context.Context, c cid.Cid) (blocks.Block, error) {
+	if err := verifcid.ValidateCid(verifcid.DefaultAllowlist, c); err != nil {
 		return nil, err
 	}
-	return bs.GCBlockstore.Get(c)
+	return bs.GCBlockstore.Get(ctx, c)
 }
 
 type VerifBS struct {
 	bstore.Blockstore
 }
 
-func (bs *VerifBS) Put(b blocks.Block) error {
-	if err := verifcid.ValidateCid(b.Cid()); err != nil {
+func (bs *VerifBS) Put(ctx context.Context, b blocks.Block) error {
+	if err := verifcid.ValidateCid(verifcid.DefaultAllowlist, b.Cid()); err != nil {
 		return err
 	}
-	return bs.Blockstore.Put(b)
+	return bs.Blockstore.Put(ctx, b)
 }
 
-func (bs *VerifBS) PutMany(blks []blocks.Block) error {
+func (bs *VerifBS) PutMany(ctx context.Context, blks []blocks.Block) error {
 	for _, b := range blks {
-		if err := verifcid.ValidateCid(b.Cid()); err != nil {
+		if err := verifcid.ValidateCid(verifcid.DefaultAllowlist, b.Cid()); err != nil {
 			return err
 		}
 	}
-	return bs.Blockstore.PutMany(blks)
+	return bs.Blockstore.PutMany(ctx, blks)
 }
 
-func (bs *VerifBS) Get(c cid.Cid) (blocks.Block, error) {
-	if err := verifcid.ValidateCid(c); err != nil {
+func (bs *VerifBS) Get(ctx context.Context, c cid.Cid) (blocks.Block, error) {
+	if err := verifcid.ValidateCid(verifcid.DefaultAllowlist, c); err != nil {
 		return nil, err
 	}
-	return bs.Blockstore.Get(c)
+	return bs.Blockstore.Get(ctx, c)
 }

@@ -8,26 +8,26 @@ import (
 // open one.
 type OnlyOne struct {
 	mu     sync.Mutex
-	active map[interface{}]*ref
+	active map[any]*ref
 }
 
 // Open a Repo identified by key. If Repo is not already open, the
-// open function is called, and the result is remember for further
+// open function is called, and the result is remembered for further
 // use.
 //
 // Key must be comparable, or Open will panic. Make sure to pick keys
 // that are unique across different concrete Repo implementations,
 // e.g. by creating a local type:
 //
-//     type repoKey string
-//     r, err := o.Open(repoKey(path), open)
+//	type repoKey string
+//	r, err := o.Open(repoKey(path), open)
 //
 // Call Repo.Close when done.
-func (o *OnlyOne) Open(key interface{}, open func() (Repo, error)) (Repo, error) {
+func (o *OnlyOne) Open(key any, open func() (Repo, error)) (Repo, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	if o.active == nil {
-		o.active = make(map[interface{}]*ref)
+		o.active = make(map[any]*ref)
 	}
 
 	item, found := o.active[key]
@@ -49,7 +49,7 @@ func (o *OnlyOne) Open(key interface{}, open func() (Repo, error)) (Repo, error)
 
 type ref struct {
 	parent *OnlyOne
-	key    interface{}
+	key    any
 	refs   uint32
 	Repo
 }

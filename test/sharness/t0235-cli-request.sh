@@ -8,26 +8,45 @@ test_description="test http requests made by cli"
 
 . lib/test-lib.sh
 
+if ! test_have_prereq SOCAT; then
+  skip_all="skipping '$test_description': socat is not available"
+  test_done
+fi
+
+
 test_init_ipfs
 
 test_expect_success "start nc" '
   rm -f nc_out nc_outp nc_inp && mkfifo nc_inp nc_outp
 
-  nc -k -l 127.0.0.1 5005 <nc_inp >nc_outp &
+  socat PIPE:nc_inp!!PIPE:nc_outp tcp-listen:5005,fork,max-children=1,bind=127.0.0.1 &
   NCPID=$!
 
   exec 6>nc_inp 7<nc_outp
 
-  while ! nc -z 127.0.0.1 5005; do
-    go-sleep 100ms
-  done
+  socat /dev/null tcp:127.0.01:5005,retry=10
 '
 
 test_expect_success "can make http request against nc server" '
-  ipfs cat /ipfs/Qmabcdef --api /ip4/127.0.0.1/tcp/5005 &
+  ipfs cat /ipfs/Qmabcdef --api /dns4/localhost/tcp/5005 &
   IPFSPID=$!
 
-  # handle request
+  # handle request for /api/v0/version
+  while read line; do
+    if [[ "$line" == "$(echo -e "\r")" ]]; then
+      break
+    fi
+    echo "$line"
+  done <&7 >nc_out &&
+
+  echo -e "HTTP/1.1 200 OK\r" >&6 &&
+  echo -e "Content-Type: application/json\r" >&6 &&
+  echo -e "Content-Length: 21\r" >&6 &&
+  echo -e "\r" >&6 &&
+  echo -e "{\"Version\":\"0.23.0\"}\r" >&6 &&
+  echo -e "\r" >&6 &&
+
+  # handle request for /api/v0/cat
   while read line; do
     if [[ "$line" == "$(echo -e "\r")" ]]; then
       break
@@ -59,6 +78,10 @@ test_expect_success "request looks good" '
 
 test_expect_success "api flag does not appear in request" '
   test_expect_code 1 grep "api=/ip4" nc_out
+'
+
+test_expect_success "host has dns name not ip address" '
+  grep "Host: localhost:5005" nc_out
 '
 
 test_done

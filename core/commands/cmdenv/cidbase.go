@@ -4,30 +4,27 @@ import (
 	"fmt"
 	"strings"
 
-	cmds "gx/ipfs/QmR77mMvvh8mJBBWQmBfQBu8oD38NUN4KE9SL2gDgAQNc6/go-ipfs-cmds"
-	cid "gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
-	cidenc "gx/ipfs/QmdPQx9fvN5ExVwMhRmh7YpCQJzJrFhd1AjVBwJmRMFJeX/go-cidutil/cidenc"
-	cmdkit "gx/ipfs/Qmde5VP1qUkyQXKCfmEUA7bP64V2HAptbJ7phuPp7jXWwg/go-ipfs-cmdkit"
-	mbase "gx/ipfs/QmekxXDhCxCJRNuzmHreuaT3BsuJcsjcXWNrtV9C8DRHtd/go-multibase"
+	cid "github.com/ipfs/go-cid"
+	cidenc "github.com/ipfs/go-cidutil/cidenc"
+	cmds "github.com/ipfs/go-ipfs-cmds"
+	mbase "github.com/multiformats/go-multibase"
 )
 
-var OptionCidBase = cmdkit.StringOption("cid-base", "Multibase encoding used for version 1 CIDs in output.")
-var OptionUpgradeCidV0InOutput = cmdkit.BoolOption("upgrade-cidv0-in-output", "Upgrade version 0 to version 1 CIDs in output.")
+var (
+	OptionCidBase = cmds.StringOption("cid-base", "Multibase encoding for CIDs in output. CIDv0 is automatically converted to CIDv1 when a base other than base58btc is specified.")
 
-// GetCidEncoder processes the `cid-base` and `output-cidv1` options and
-// returns a encoder to use based on those parameters.
+	// OptionUpgradeCidV0InOutput is deprecated. When --cid-base is set to
+	// anything other than base58btc, CIDv0 are now automatically upgraded
+	// to CIDv1. This flag is kept for backward compatibility and will be
+	// removed in a future release.
+	OptionUpgradeCidV0InOutput = cmds.BoolOption("upgrade-cidv0-in-output", "[DEPRECATED] Upgrade version 0 to version 1 CIDs in output.")
+)
+
+// GetCidEncoder processes the --cid-base option and returns an encoder.
+// When --cid-base is set to a non-base58btc encoding, CIDv0 values are
+// automatically upgraded to CIDv1 because CIDv0 can only be represented
+// in base58btc.
 func GetCidEncoder(req *cmds.Request) (cidenc.Encoder, error) {
-	return getCidBase(req, true)
-}
-
-// GetLowLevelCidEncoder is like GetCidEncoder but meant to be used by
-// lower level commands.  It differs from GetCidEncoder in that CIDv0
-// are not, by default, auto-upgraded to CIDv1.
-func GetLowLevelCidEncoder(req *cmds.Request) (cidenc.Encoder, error) {
-	return getCidBase(req, false)
-}
-
-func getCidBase(req *cmds.Request, autoUpgrade bool) (cidenc.Encoder, error) {
 	base, _ := req.Options[OptionCidBase.Name()].(string)
 	upgrade, upgradeDefined := req.Options[OptionUpgradeCidV0InOutput.Name()].(bool)
 
@@ -39,11 +36,16 @@ func getCidBase(req *cmds.Request, autoUpgrade bool) (cidenc.Encoder, error) {
 		if err != nil {
 			return e, err
 		}
-		if autoUpgrade {
+		// CIDv0 can only be represented in base58btc. When any other
+		// base is requested, always upgrade CIDv0 to CIDv1 so the
+		// output actually uses the requested encoding.
+		if e.Base.Encoding() != mbase.Base58BTC {
 			e.Upgrade = true
 		}
 	}
 
+	// Deprecated: --upgrade-cidv0-in-output still works as an explicit
+	// override for backward compatibility.
 	if upgradeDefined {
 		e.Upgrade = upgrade
 	}
@@ -51,19 +53,19 @@ func getCidBase(req *cmds.Request, autoUpgrade bool) (cidenc.Encoder, error) {
 	return e, nil
 }
 
-// CidBaseDefined returns true if the `cid-base` option is specified
-// on the command line
+// CidBaseDefined returns true if the `cid-base` option is specified on the
+// command line
 func CidBaseDefined(req *cmds.Request) bool {
 	base, _ := req.Options["cid-base"].(string)
 	return base != ""
 }
 
-// CidEncoderFromPath creates a new encoder that is influenced from
-// the encoded Cid in a Path.  For CidV0 the multibase from the base
-// encoder is used and automatic upgrades are disabled.  For CidV1 the
-// multibase from the CID is used and upgrades are enabled.
+// CidEncoderFromPath creates a new encoder that is influenced from the encoded
+// Cid in a Path. For CIDv0 the multibase from the base encoder is used and
+// automatic upgrades are disabled. For CIDv1 the multibase from the CID is
+// used and upgrades are enabled.
 //
-// This logic is intentionally fuzzy and will match anything of the form
+// This logic is intentionally fuzzy and matches anything of the form
 // `CidLike`, `CidLike/...`, or `/namespace/CidLike/...`.
 //
 // For example:

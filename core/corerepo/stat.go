@@ -6,10 +6,10 @@ import (
 
 	context "context"
 
-	"github.com/ipfs/go-ipfs/core"
-	fsrepo "github.com/ipfs/go-ipfs/repo/fsrepo"
+	"github.com/ipfs/kubo/core"
+	fsrepo "github.com/ipfs/kubo/repo/fsrepo"
 
-	humanize "gx/ipfs/QmPSBJL4momYnE7DcUyk2DVhD6rH488ZmHBGLbxNdhU44K/go-humanize"
+	humanize "github.com/dustin/go-humanize"
 )
 
 // SizeStat wraps information about the repository size and its limit.
@@ -71,7 +71,7 @@ func RepoSize(ctx context.Context, n *core.IpfsNode) (SizeStat, error) {
 		return SizeStat{}, err
 	}
 
-	usage, err := r.GetStorageUsage()
+	usage, err := r.GetStorageUsage(ctx)
 	if err != nil {
 		return SizeStat{}, err
 	}

@@ -2,28 +2,33 @@ package coreapi
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	gopath "path"
 
-	"github.com/ipfs/go-ipfs/core"
-	coreiface "github.com/ipfs/go-ipfs/core/coreapi/interface"
+	"github.com/ipfs/boxo/namesys"
+	"github.com/ipfs/kubo/tracing"
 
-	ipfspath "gx/ipfs/QmQ3YSqfxunT5QBg6KBVskKyRE26q6hjSMyhpxchpm7jEN/go-path"
-	"gx/ipfs/QmQ3YSqfxunT5QBg6KBVskKyRE26q6hjSMyhpxchpm7jEN/go-path/resolver"
-	"gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
-	ipld "gx/ipfs/QmRL22E4paat7ky7vx9MLpR97JHHbFPrg3ytFQw6qp1y1s/go-ipld-format"
-	uio "gx/ipfs/QmZArMcsVDsXdcLbUx4844CuqKXBpbxdeiryM4cnmGTNRq/go-unixfs/io"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/ipfs/boxo/path"
+	ipfspathresolver "github.com/ipfs/boxo/path/resolver"
+	ipld "github.com/ipfs/go-ipld-format"
+	coreiface "github.com/ipfs/kubo/core/coreiface"
 )
 
 // ResolveNode resolves the path `p` using Unixfs resolver, gets and returns the
 // resolved Node.
-func (api *CoreAPI) ResolveNode(ctx context.Context, p coreiface.Path) (ipld.Node, error) {
-	rp, err := api.ResolvePath(ctx, p)
+func (api *CoreAPI) ResolveNode(ctx context.Context, p path.Path) (ipld.Node, error) {
+	ctx, span := tracing.Span(ctx, "CoreAPI", "ResolveNode", trace.WithAttributes(attribute.String("path", p.String())))
+	defer span.End()
+
+	rp, _, err := api.ResolvePath(ctx, p)
 	if err != nil {
 		return nil, err
 	}
 
-	node, err := api.dag.Get(ctx, rp.Cid())
+	node, err := api.dag.Get(ctx, rp.RootCid())
 	if err != nil {
 		return nil, err
 	}
@@ -32,44 +37,50 @@ func (api *CoreAPI) ResolveNode(ctx context.Context, p coreiface.Path) (ipld.Nod
 
 // ResolvePath resolves the path `p` using Unixfs resolver, returns the
 // resolved path.
-func (api *CoreAPI) ResolvePath(ctx context.Context, p coreiface.Path) (coreiface.ResolvedPath, error) {
-	if _, ok := p.(coreiface.ResolvedPath); ok {
-		return p.(coreiface.ResolvedPath), nil
-	}
+func (api *CoreAPI) ResolvePath(ctx context.Context, p path.Path) (path.ImmutablePath, []string, error) {
+	ctx, span := tracing.Span(ctx, "CoreAPI", "ResolvePath", trace.WithAttributes(attribute.String("path", p.String())))
+	defer span.End()
 
-	ipath := ipfspath.Path(p.String())
-	ipath, err := core.ResolveIPNS(ctx, api.namesys, ipath)
-	if err == core.ErrNoNamesys {
-		return nil, coreiface.ErrOffline
+	res, err := namesys.Resolve(ctx, api.namesys, p)
+	if errors.Is(err, namesys.ErrNoNamesys) {
+		return path.ImmutablePath{}, nil, coreiface.ErrOffline
 	} else if err != nil {
-		return nil, err
+		return path.ImmutablePath{}, nil, err
 	}
+	p = res.Path
 
-	var resolveOnce resolver.ResolveOnce
-
-	switch ipath.Segments()[0] {
-	case "ipfs":
-		resolveOnce = uio.ResolveUnixfsOnce
-	case "ipld":
-		resolveOnce = resolver.ResolveSingle
+	var resolver ipfspathresolver.Resolver
+	switch p.Namespace() {
+	case path.IPLDNamespace:
+		resolver = api.ipldPathResolver
+	case path.IPFSNamespace:
+		resolver = api.unixFSPathResolver
 	default:
-		return nil, fmt.Errorf("unsupported path namespace: %s", p.Namespace())
+		return path.ImmutablePath{}, nil, fmt.Errorf("unsupported path namespace: %s", p.Namespace())
 	}
 
-	r := &resolver.Resolver{
-		DAG:         api.dag,
-		ResolveOnce: resolveOnce,
-	}
-
-	node, rest, err := r.ResolveToLastNode(ctx, ipath)
+	imPath, err := path.NewImmutablePath(p)
 	if err != nil {
-		return nil, err
+		return path.ImmutablePath{}, nil, err
 	}
 
-	root, err := cid.Parse(ipath.Segments()[1])
+	node, remainder, err := resolver.ResolveToLastNode(ctx, imPath)
 	if err != nil {
-		return nil, err
+		return path.ImmutablePath{}, nil, err
 	}
 
-	return coreiface.NewResolvedPath(ipath, node, root, gopath.Join(rest...)), nil
+	segments := []string{p.Namespace(), node.String()}
+	segments = append(segments, remainder...)
+
+	p, err = path.NewPathFromSegments(segments...)
+	if err != nil {
+		return path.ImmutablePath{}, nil, err
+	}
+
+	imPath, err = path.NewImmutablePath(p)
+	if err != nil {
+		return path.ImmutablePath{}, nil, err
+	}
+
+	return imPath, remainder, nil
 }

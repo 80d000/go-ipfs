@@ -1,5 +1,5 @@
-// +build !nofuse
-// +build !windows
+// FUSE mount/unmount lifecycle. go-fuse only builds on linux, darwin, and freebsd.
+//go:build (linux || darwin || freebsd) && !nofuse
 
 package mount
 
@@ -7,119 +7,66 @@ import (
 	"errors"
 	"fmt"
 	"sync"
-	"time"
 
-	"gx/ipfs/QmSF8fPo3jgVBAy8fpdjjYqgG87dkJgUprRBHRd2tmfgpP/goprocess"
-	"gx/ipfs/QmSJBsmLP1XMjv8hxYg2rUMdPDB7YUpyBo9idjrJ6Cmq6F/fuse"
-	"gx/ipfs/QmSJBsmLP1XMjv8hxYg2rUMdPDB7YUpyBo9idjrJ6Cmq6F/fuse/fs"
+	"github.com/hanwen/go-fuse/v2/fs"
+	"github.com/hanwen/go-fuse/v2/fuse"
 )
 
 var ErrNotMounted = errors.New("not mounted")
 
-// mount implements go-ipfs/fuse/mount
+// mount implements go-ipfs/fuse/mount.
 type mount struct {
-	mpoint   string
-	filesys  fs.FS
-	fuseConn *fuse.Conn
+	mpoint string
+	server *fuse.Server
 
 	active     bool
 	activeLock *sync.RWMutex
 
-	proc goprocess.Process
+	unmountOnce sync.Once
 }
 
-// Mount mounts a fuse fs.FS at a given location, and returns a Mount instance.
-// parent is a ContextGroup to bind the mount's ContextGroup to.
-func NewMount(p goprocess.Process, fsys fs.FS, mountpoint string, allow_other bool) (Mount, error) {
-	var conn *fuse.Conn
-	var err error
-
-	if allow_other {
-		conn, err = fuse.Mount(mountpoint, fuse.AllowOther())
-	} else {
-		conn, err = fuse.Mount(mountpoint)
+// NewMount mounts a FUSE filesystem at a given location, and returns a Mount instance.
+func NewMount(root fs.InodeEmbedder, mountpoint string, opts *fs.Options) (Mount, error) {
+	PlatformMountOpts(&opts.MountOptions)
+	if opts.RootStableAttr == nil {
+		opts.RootStableAttr = &fs.StableAttr{Ino: RootIno}
 	}
-
+	if opts.FirstAutomaticIno == 0 {
+		opts.FirstAutomaticIno = AutomaticIno
+	}
+	server, err := fs.Mount(mountpoint, root, opts)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("mounting %s: %w", mountpoint, err)
 	}
 
 	m := &mount{
 		mpoint:     mountpoint,
-		fuseConn:   conn,
-		filesys:    fsys,
-		active:     false,
+		server:     server,
+		active:     true,
 		activeLock: &sync.RWMutex{},
-		proc:       goprocess.WithParent(p), // link it to parent.
-	}
-	m.proc.SetTeardown(m.unmount)
-
-	// launch the mounting process.
-	if err := m.mount(); err != nil {
-		m.Unmount() // just in case.
-		return nil, err
 	}
 
-	return m, nil
-}
-
-func (m *mount) mount() error {
-	log.Infof("Mounting %s", m.MountPoint())
-
-	errs := make(chan error, 1)
+	// Detect external unmount (e.g. fusermount -u) so IsActive
+	// returns false and Unmount returns ErrNotMounted.
 	go func() {
-		// fs.Serve blocks until the filesystem is unmounted.
-		err := fs.Serve(m.fuseConn, m.filesys)
-		log.Debugf("%s is unmounted", m.MountPoint())
-		if err != nil {
-			log.Debugf("fs.Serve returned (%s)", err)
-			errs <- err
-		}
+		server.Wait()
 		m.setActive(false)
 	}()
 
-	// wait for the mount process to be done, or timed out.
-	select {
-	case <-time.After(MountTimeout):
-		return fmt.Errorf("mounting %s timed out", m.MountPoint())
-	case err := <-errs:
-		return err
-	case <-m.fuseConn.Ready:
-	}
-
-	// check if the mount process has an error to report
-	if err := m.fuseConn.MountError; err != nil {
-		return err
-	}
-
-	m.setActive(true)
-
-	log.Infof("Mounted %s", m.MountPoint())
-	return nil
+	log.Infof("Mounted %s", mountpoint)
+	return m, nil
 }
 
-// umount is called exactly once to unmount this service.
-// note that closing the connection will not always unmount
-// properly. If that happens, we bring out the big guns
-// (mount.ForceUnmountManyTimes, exec unmount).
+// unmount is called exactly once to unmount this service.
 func (m *mount) unmount() error {
 	log.Infof("Unmounting %s", m.MountPoint())
 
-	// try unmounting with fuse lib
-	err := fuse.Unmount(m.MountPoint())
+	err := m.server.Unmount()
 	if err == nil {
 		m.setActive(false)
 		return nil
 	}
-	log.Warningf("fuse unmount err: %s", err)
-
-	// try closing the fuseConn
-	err = m.fuseConn.Close()
-	if err == nil {
-		m.setActive(false)
-		return nil
-	}
-	log.Warningf("fuse conn error: %s", err)
+	log.Warnf("fuse unmount err: %s", err)
 
 	// try mount.ForceUnmountManyTimes
 	if err := ForceUnmountManyTimes(m, 10); err != nil {
@@ -131,10 +78,6 @@ func (m *mount) unmount() error {
 	return nil
 }
 
-func (m *mount) Process() goprocess.Process {
-	return m.proc
-}
-
 func (m *mount) MountPoint() string {
 	return m.mpoint
 }
@@ -144,8 +87,12 @@ func (m *mount) Unmount() error {
 		return ErrNotMounted
 	}
 
-	// call Process Close(), which calls unmount() exactly once.
-	return m.proc.Close()
+	var err error
+	m.unmountOnce.Do(func() {
+		err = m.unmount()
+	})
+
+	return err
 }
 
 func (m *mount) IsActive() bool {

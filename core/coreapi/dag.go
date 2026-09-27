@@ -3,10 +3,14 @@ package coreapi
 import (
 	"context"
 
-	"github.com/ipfs/go-ipfs/pin"
+	dag "github.com/ipfs/boxo/ipld/merkledag"
+	pin "github.com/ipfs/boxo/pinning/pinner"
+	cid "github.com/ipfs/go-cid"
+	ipld "github.com/ipfs/go-ipld-format"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
-	cid "gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
-	ipld "gx/ipfs/QmRL22E4paat7ky7vx9MLpR97JHHbFPrg3ytFQw6qp1y1s/go-ipld-format"
+	"github.com/ipfs/kubo/tracing"
 )
 
 type dagAPI struct {
@@ -18,19 +22,25 @@ type dagAPI struct {
 type pinningAdder CoreAPI
 
 func (adder *pinningAdder) Add(ctx context.Context, nd ipld.Node) error {
-	defer adder.blockstore.PinLock().Unlock()
+	ctx, span := tracing.Span(ctx, "CoreAPI.PinningAdder", "Add", trace.WithAttributes(attribute.String("node", nd.String())))
+	defer span.End()
+	defer adder.blockstore.PinLock(ctx).Unlock(ctx)
 
 	if err := adder.dag.Add(ctx, nd); err != nil {
 		return err
 	}
 
-	adder.pinning.PinWithMode(nd.Cid(), pin.Recursive)
+	if err := adder.pinning.PinWithMode(ctx, nd.Cid(), pin.Recursive, ""); err != nil {
+		return err
+	}
 
-	return adder.pinning.Flush()
+	return adder.pinning.Flush(ctx)
 }
 
 func (adder *pinningAdder) AddMany(ctx context.Context, nds []ipld.Node) error {
-	defer adder.blockstore.PinLock().Unlock()
+	ctx, span := tracing.Span(ctx, "CoreAPI.PinningAdder", "AddMany", trace.WithAttributes(attribute.Int("nodes.count", len(nds))))
+	defer span.End()
+	defer adder.blockstore.PinLock(ctx).Unlock(ctx)
 
 	if err := adder.dag.AddMany(ctx, nds); err != nil {
 		return err
@@ -41,13 +51,24 @@ func (adder *pinningAdder) AddMany(ctx context.Context, nds []ipld.Node) error {
 	for _, nd := range nds {
 		c := nd.Cid()
 		if cids.Visit(c) {
-			adder.pinning.PinWithMode(c, pin.Recursive)
+			if err := adder.pinning.PinWithMode(ctx, c, pin.Recursive, ""); err != nil {
+				return err
+			}
 		}
 	}
 
-	return adder.pinning.Flush()
+	return adder.pinning.Flush(ctx)
 }
 
 func (api *dagAPI) Pinning() ipld.NodeAdder {
 	return (*pinningAdder)(api.core)
 }
+
+func (api *dagAPI) Session(ctx context.Context) ipld.NodeGetter {
+	return dag.NewSession(ctx, api.DAGService)
+}
+
+var (
+	_ ipld.DAGService  = (*dagAPI)(nil)
+	_ dag.SessionMaker = (*dagAPI)(nil)
+)

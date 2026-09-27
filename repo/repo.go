@@ -1,26 +1,34 @@
 package repo
 
 import (
+	"context"
 	"errors"
 	"io"
+	"net"
 
-	filestore "github.com/ipfs/go-ipfs/filestore"
-	keystore "github.com/ipfs/go-ipfs/keystore"
+	filestore "github.com/ipfs/boxo/filestore"
+	keystore "github.com/ipfs/boxo/keystore"
+	rcmgr "github.com/libp2p/go-libp2p/p2p/host/resource-manager"
 
-	ma "gx/ipfs/QmNTCey11oxhb1AxDnQBRHtdhap6Ctud872NjAYPYYXPuc/go-multiaddr"
-	config "gx/ipfs/QmTbcMKv6GU3fxhnNcbzYChdox9Fdd7VpucM3PQ7UWjX3D/go-ipfs-config"
-	ds "gx/ipfs/Qmf4xQhNomPNhrtZc67qSnfJSjxjXs9LWvknJtSXwimPrM/go-datastore"
+	ds "github.com/ipfs/go-datastore"
+	config "github.com/ipfs/kubo/config"
+	ma "github.com/multiformats/go-multiaddr"
 )
 
-var (
-	ErrApiNotRunning = errors.New("api not running")
-)
+var ErrApiNotRunning = errors.New("api not running") //nolint
 
 // Repo represents all persistent data of a given ipfs node.
 type Repo interface {
 	// Config returns the ipfs configuration file from the repo. Changes made
 	// to the returned config are not automatically persisted.
 	Config() (*config.Config, error)
+
+	// Path is the repo file-system path
+	Path() string
+
+	// UserResourceOverrides returns optional user resource overrides for the
+	// libp2p resource manager.
+	UserResourceOverrides() (rcmgr.PartialLimitConfig, error)
 
 	// BackupConfig creates a backup of the current configuration file using
 	// the given prefix for naming.
@@ -30,16 +38,16 @@ type Repo interface {
 	SetConfig(*config.Config) error
 
 	// SetConfigKey sets the given key-value pair within the config and persists it to storage.
-	SetConfigKey(key string, value interface{}) error
+	SetConfigKey(key string, value any) error
 
 	// GetConfigKey reads the value for the given key from the configuration in storage.
-	GetConfigKey(key string) (interface{}, error)
+	GetConfigKey(key string) (any, error)
 
 	// Datastore returns a reference to the configured data storage backend.
 	Datastore() Datastore
 
 	// GetStorageUsage returns the number of bytes stored.
-	GetStorageUsage() (uint64, error)
+	GetStorageUsage(context.Context) (uint64, error)
 
 	// Keystore returns a reference to the key management interface.
 	Keystore() keystore.Keystore
@@ -50,6 +58,9 @@ type Repo interface {
 	// SetAPIAddr sets the API address in the repo.
 	SetAPIAddr(addr ma.Multiaddr) error
 
+	// SetGatewayAddr sets the Gateway address in the repo.
+	SetGatewayAddr(addr net.Addr) error
+
 	// SwarmKey returns the configured shared symmetric key for the private networks feature.
 	SwarmKey() ([]byte, error)
 
@@ -59,6 +70,5 @@ type Repo interface {
 // Datastore is the interface required from a datastore to be
 // acceptable to FSRepo.
 type Datastore interface {
-	ds.Batching // should be threadsafe, just be careful
-	io.Closer
+	ds.Batching // must be thread-safe
 }

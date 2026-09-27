@@ -5,21 +5,18 @@
 #
 
 # changing the bootstrap peers will require changing it in two places :)
-BP1="/dnsaddr/bootstrap.libp2p.io/ipfs/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN"
-BP2="/dnsaddr/bootstrap.libp2p.io/ipfs/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa"
-BP3="/dnsaddr/bootstrap.libp2p.io/ipfs/QmbLHAnMoJPWSCR5Zhtx6BHJX9KiKNN6tpvbUcqanj75Nb"
-BP4="/dnsaddr/bootstrap.libp2p.io/ipfs/QmcZf59bWwK5XFi76CZX8cbJ4BhTzzA3gU1ZjYZcYW3dwt"
-BP5="/ip4/104.131.131.82/tcp/4001/ipfs/QmaCpDMGvV2BGHeYERUEnRQAwe3N8SzbUtfsmvsqQLuvuJ"
-BP6="/ip4/104.236.179.241/tcp/4001/ipfs/QmSoLPppuBtQSGwKDZT2M73ULpjvfd3aZ6ha4oFGL1KrGM"
-BP7="/ip4/104.236.76.40/tcp/4001/ipfs/QmSoLV4Bbm51jM9C4gDYZQ9Cy3U6aXMJDAbzgu2fzaDs64"
-BP8="/ip4/128.199.219.111/tcp/4001/ipfs/QmSoLSafTMBsPKadTEgaXctDQVcqN88CNLHXMkTNwMKPnu"
-BP9="/ip4/178.62.158.247/tcp/4001/ipfs/QmSoLer265NRgSp2LA3dPaeykiS1J6DifTC88f5uVQKNAd"
-BP10="/ip6/2400:6180:0:d0::151:6001/tcp/4001/ipfs/QmSoLSafTMBsPKadTEgaXctDQVcqN88CNLHXMkTNwMKPnu"
-BP11="/ip6/2604:a880:1:20::203:d001/tcp/4001/ipfs/QmSoLPppuBtQSGwKDZT2M73ULpjvfd3aZ6ha4oFGL1KrGM"
-BP12="/ip6/2604:a880:800:10::4a:5001/tcp/4001/ipfs/QmSoLV4Bbm51jM9C4gDYZQ9Cy3U6aXMJDAbzgu2fzaDs64"
-BP13="/ip6/2a03:b0c0:0:1010::23:1001/tcp/4001/ipfs/QmSoLer265NRgSp2LA3dPaeykiS1J6DifTC88f5uVQKNAd"
+BP1="/dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN"
+BP2="/dnsaddr/bootstrap.libp2p.io/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa"
+BP3="/dnsaddr/bootstrap.libp2p.io/p2p/QmbLHAnMoJPWSCR5Zhtx6BHJX9KiKNN6tpvbUcqanj75Nb"
+BP4="/dnsaddr/bootstrap.libp2p.io/p2p/QmcZf59bWwK5XFi76CZX8cbJ4BhTzzA3gU1ZjYZcYW3dwt"
+BP5="/dnsaddr/va1.bootstrap.libp2p.io/p2p/12D3KooWKnDdG3iXw9eTFijk3EWSunZcFi54Zka4wmtqtt6rPxc8"
+BP6="/ip4/104.131.131.82/tcp/4001/p2p/QmaCpDMGvV2BGHeYERUEnRQAwe3N8SzbUtfsmvsqQLuvuJ"
+BP7="/ip4/104.131.131.82/udp/4001/quic-v1/p2p/QmaCpDMGvV2BGHeYERUEnRQAwe3N8SzbUtfsmvsqQLuvuJ"
 
-test_description="Test ipfs repo operations"
+test_description="Test ipfs bootstrap operations"
+
+# NOTE: For AutoConf bootstrap functionality (add default, --expand-auto, etc.)
+# see test/cli/bootstrap_auto_test.go and test/cli/autoconf/expand_test.go
 
 . lib/test-lib.sh
 
@@ -83,49 +80,18 @@ test_bootstrap_cmd() {
     test_cmp rm_expected rm_actual
   '
 
+  test_expect_success "'ipfs bootstrap rm' fails on bad peers" '
+    test_expect_code 1 ipfs bootstrap rm "foo/bar"
+  '
+
   test_bootstrap_list_cmd $BP2
-
-  test_expect_success "'ipfs bootstrap add --default' succeeds" '
-    ipfs bootstrap add --default >add2_actual
-  '
-
-  test_expect_success "'ipfs bootstrap add --default' output has default BP" '
-    echo "added $BP1" >add2_expected &&
-    echo "added $BP2" >>add2_expected &&
-    echo "added $BP3" >>add2_expected &&
-    echo "added $BP4" >>add2_expected &&
-    echo "added $BP5" >>add2_expected &&
-    echo "added $BP6" >>add2_expected &&
-    echo "added $BP7" >>add2_expected &&
-    echo "added $BP8" >>add2_expected &&
-    echo "added $BP9" >>add2_expected &&
-    echo "added $BP10" >>add2_expected &&
-    echo "added $BP11" >>add2_expected &&
-    echo "added $BP12" >>add2_expected &&
-    echo "added $BP13" >>add2_expected &&
-    test_cmp add2_expected add2_actual
-  '
-
-  test_bootstrap_list_cmd $BP1 $BP2 $BP3 $BP4 $BP5 $BP6 $BP7 $BP8 $BP9 $BP10 $BP11 $BP12 $BP13 $BP14 $BP15 $BP16 $BP17
 
   test_expect_success "'ipfs bootstrap rm --all' succeeds" '
     ipfs bootstrap rm --all >rm2_actual
   '
 
   test_expect_success "'ipfs bootstrap rm' output looks good" '
-    echo "removed $BP1" >rm2_expected &&
-    echo "removed $BP2" >>rm2_expected &&
-    echo "removed $BP3" >>rm2_expected &&
-    echo "removed $BP4" >>rm2_expected &&
-    echo "removed $BP5" >>rm2_expected &&
-    echo "removed $BP6" >>rm2_expected &&
-    echo "removed $BP7" >>rm2_expected &&
-    echo "removed $BP8" >>rm2_expected &&
-    echo "removed $BP9" >>rm2_expected &&
-    echo "removed $BP10" >>rm2_expected &&
-    echo "removed $BP11" >>rm2_expected &&
-    echo "removed $BP12" >>rm2_expected &&
-    echo "removed $BP13" >>rm2_expected &&
+    echo "removed $BP2" >rm2_expected &&
     test_cmp rm2_expected rm2_actual
   '
 

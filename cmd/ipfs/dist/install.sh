@@ -6,18 +6,21 @@
 INSTALL_DIR=$(dirname $0)
 
 bin="$INSTALL_DIR/ipfs"
-binpaths="/usr/local/bin /usr/bin"
+binpaths='/usr/local/bin /usr/bin $HOME/.local/bin'
 
 # This variable contains a nonzero length string in case the script fails
 # because of missing write permissions.
 is_write_perm_missing=""
 
-for binpath in $binpaths; do
-  if mv "$bin" "$binpath/$bin" 2> /dev/null; then
+for raw in $binpaths; do
+  # Expand the $HOME variable.
+  binpath=$(eval echo "$raw")
+  mkdir -p "$binpath"
+  if mv "$bin" "$binpath/ipfs" ; then
     echo "Moved $bin to $binpath"
     exit 0
   else
-    if [ -d "$binpath" -a ! -w "$binpath" ]; then
+    if [ -d "$binpath" ] && [ ! -w "$binpath" ]; then
       is_write_perm_missing=1
     fi
   fi

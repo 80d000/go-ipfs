@@ -6,14 +6,16 @@ import (
 	"io"
 	"os"
 
-	util "github.com/ipfs/go-ipfs/blocks/blockstoreutil"
-	cmdenv "github.com/ipfs/go-ipfs/core/commands/cmdenv"
-	coreiface "github.com/ipfs/go-ipfs/core/coreapi/interface"
-	"github.com/ipfs/go-ipfs/core/coreapi/interface/options"
+	"github.com/ipfs/boxo/files"
 
-	cmds "gx/ipfs/QmR77mMvvh8mJBBWQmBfQBu8oD38NUN4KE9SL2gDgAQNc6/go-ipfs-cmds"
-	cmdkit "gx/ipfs/Qmde5VP1qUkyQXKCfmEUA7bP64V2HAptbJ7phuPp7jXWwg/go-ipfs-cmdkit"
-	mh "gx/ipfs/QmerPMzPk1mJVowm8KgmoknWa4yCYvvugMPsgWmDNUvDLW/go-multihash"
+	"github.com/ipfs/kubo/config"
+	cmdenv "github.com/ipfs/kubo/core/commands/cmdenv"
+	"github.com/ipfs/kubo/core/commands/cmdutils"
+
+	options "github.com/ipfs/kubo/core/coreiface/options"
+
+	cmds "github.com/ipfs/go-ipfs-cmds"
+	mh "github.com/multiformats/go-multihash"
 )
 
 type BlockStat struct {
@@ -26,12 +28,12 @@ func (bs BlockStat) String() string {
 }
 
 var BlockCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
+	Helptext: cmds.HelpText{
 		Tagline: "Interact with raw IPFS blocks.",
 		ShortDescription: `
 'ipfs block' is a plumbing command used to manipulate raw IPFS blocks.
-Reads from stdin or writes to stdout, and <key> is a base58 encoded
-multihash.
+Reads from stdin or writes to stdout. A block is identified by a Multihash
+passed with a valid CID.
 `,
 	},
 
@@ -44,20 +46,20 @@ multihash.
 }
 
 var blockStatCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
+	Helptext: cmds.HelpText{
 		Tagline: "Print information of a raw IPFS block.",
 		ShortDescription: `
 'ipfs block stat' is a plumbing command for retrieving information
 on raw IPFS blocks. It outputs the following to stdout:
 
-	Key  - the base58 encoded multihash
+	Key  - the CID of the block
 	Size - the size of the block in bytes
 
 `,
 	},
 
-	Arguments: []cmdkit.Argument{
-		cmdkit.StringArg("key", true, false, "The base58 multihash of an existing block to stat.").EnableStdin(),
+	Arguments: []cmds.Argument{
+		cmds.StringArg("cid", true, false, "The CID of an existing block to stat.").EnableStdin(),
 	},
 	Run: func(req *cmds.Request, res cmds.ResponseEmitter, env cmds.Environment) error {
 		api, err := cmdenv.GetApi(env, req)
@@ -65,7 +67,12 @@ on raw IPFS blocks. It outputs the following to stdout:
 			return err
 		}
 
-		p, err := coreiface.ParsePath(req.Arguments[0])
+		enc, err := cmdenv.GetCidEncoder(req)
+		if err != nil {
+			return err
+		}
+
+		p, err := cmdutils.PathOrCidPath(req.Arguments[0])
 		if err != nil {
 			return err
 		}
@@ -76,7 +83,7 @@ on raw IPFS blocks. It outputs the following to stdout:
 		}
 
 		return cmds.EmitOnce(res, &BlockStat{
-			Key:  b.Path().Cid().String(),
+			Key:  enc.Encode(b.Path().RootCid()),
 			Size: b.Size(),
 		})
 	},
@@ -90,16 +97,19 @@ on raw IPFS blocks. It outputs the following to stdout:
 }
 
 var blockGetCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
+	Helptext: cmds.HelpText{
 		Tagline: "Get a raw IPFS block.",
 		ShortDescription: `
 'ipfs block get' is a plumbing command for retrieving raw IPFS blocks.
-It outputs to stdout, and <key> is a base58 encoded multihash.
+It takes a <cid>, and outputs the block to stdout.
 `,
+		HTTP: &cmds.HTTPHelpText{
+			ResponseContentType: "application/vnd.ipld.raw",
+		},
 	},
 
-	Arguments: []cmdkit.Argument{
-		cmdkit.StringArg("key", true, false, "The base58 multihash of an existing block to get.").EnableStdin(),
+	Arguments: []cmds.Argument{
+		cmds.StringArg("cid", true, false, "The CID of an existing block to get.").EnableStdin(),
 	},
 	Run: func(req *cmds.Request, res cmds.ResponseEmitter, env cmds.Environment) error {
 		api, err := cmdenv.GetApi(env, req)
@@ -107,7 +117,7 @@ It outputs to stdout, and <key> is a base58 encoded multihash.
 			return err
 		}
 
-		p, err := coreiface.ParsePath(req.Arguments[0])
+		p, err := cmdutils.PathOrCidPath(req.Arguments[0])
 		if err != nil {
 			return err
 		}
@@ -117,36 +127,48 @@ It outputs to stdout, and <key> is a base58 encoded multihash.
 			return err
 		}
 
+		res.SetEncodingType(cmds.OctetStream)
+		res.SetContentType("application/vnd.ipld.raw")
 		return res.Emit(r)
 	},
 }
 
 const (
-	blockFormatOptionName = "format"
-	mhtypeOptionName      = "mhtype"
-	mhlenOptionName       = "mhlen"
+	blockFormatOptionName   = "format"
+	blockCidCodecOptionName = "cid-codec"
+	mhtypeOptionName        = "mhtype"
+	mhlenOptionName         = "mhlen"
 )
 
 var blockPutCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
+	Helptext: cmds.HelpText{
 		Tagline: "Store input as an IPFS block.",
 		ShortDescription: `
 'ipfs block put' is a plumbing command for storing raw IPFS blocks.
-It reads from stdin, and <key> is a base58 encoded multihash.
+It reads data from stdin, and outputs the block's CID to stdout.
 
-By default CIDv0 is going to be generated. Setting 'mhtype' to anything other
-than 'sha2-256' or format to anything other than 'v0' will result in CIDv1.
+Unless cid-codec is specified, this command returns raw (0x55) CIDv1 CIDs.
+
+Passing alternative --cid-codec does not modify imported data, nor run any
+validation. It is provided solely for convenience for users who create blocks
+in userland.
+
+NOTE:
+Do not use --format for any new code. It got superseded by --cid-codec and left
+only for backward compatibility when a legacy CIDv0 is required (--format=v0).
 `,
 	},
 
-	Arguments: []cmdkit.Argument{
-		cmdkit.FileArg("data", true, false, "The data to be stored as an IPFS block.").EnableStdin(),
+	Arguments: []cmds.Argument{
+		cmds.FileArg("data", true, true, "The data to be stored as an IPFS block.").EnableStdin(),
 	},
-	Options: []cmdkit.Option{
-		cmdkit.StringOption(blockFormatOptionName, "f", "cid format for blocks to be created with."),
-		cmdkit.StringOption(mhtypeOptionName, "multihash hash function").WithDefault("sha2-256"),
-		cmdkit.IntOption(mhlenOptionName, "multihash hash length").WithDefault(-1),
-		cmdkit.BoolOption(pinOptionName, "pin added blocks recursively").WithDefault(false),
+	Options: []cmds.Option{
+		cmds.StringOption(blockCidCodecOptionName, "Multicodec to use in returned CID").WithDefault("raw"),
+		cmds.StringOption(mhtypeOptionName, "Multihash hash function"),
+		cmds.IntOption(mhlenOptionName, "Multihash hash length").WithDefault(-1),
+		cmds.BoolOption(pinOptionName, "Pin added blocks recursively").WithDefault(false),
+		cmdutils.AllowBigBlockOption,
+		cmds.StringOption(blockFormatOptionName, "f", "Use legacy format for returned CID (DEPRECATED)"),
 	},
 	Run: func(req *cmds.Request, res cmds.ResponseEmitter, env cmds.Environment) error {
 		api, err := cmdenv.GetApi(env, req)
@@ -154,12 +176,26 @@ than 'sha2-256' or format to anything other than 'v0' will result in CIDv1.
 			return err
 		}
 
-		file, err := cmdenv.GetFileArg(req.Files.Entries())
+		enc, err := cmdenv.GetCidEncoder(req)
+		if err != nil {
+			return err
+		}
+
+		nd, err := cmdenv.GetNode(env)
+		if err != nil {
+			return err
+		}
+
+		cfg, err := nd.Repo.Config()
 		if err != nil {
 			return err
 		}
 
 		mhtype, _ := req.Options[mhtypeOptionName].(string)
+		if mhtype == "" {
+			mhtype = cfg.Import.HashFunction.WithDefault(config.DefaultHashFunction)
+		}
+
 		mhtval, ok := mh.Names[mhtype]
 		if !ok {
 			return fmt.Errorf("unrecognized multihash function: %s", mhtype)
@@ -170,29 +206,49 @@ than 'sha2-256' or format to anything other than 'v0' will result in CIDv1.
 			return errors.New("missing option \"mhlen\"")
 		}
 
-		format, formatSet := req.Options[blockFormatOptionName].(string)
-		if !formatSet {
-			if mhtval != mh.SHA2_256 || (mhlen != -1 && mhlen != 32) {
-				format = "protobuf"
-			} else {
-				format = "v0"
+		cidCodec, _ := req.Options[blockCidCodecOptionName].(string)
+		format, _ := req.Options[blockFormatOptionName].(string) // deprecated
+
+		// use of legacy 'format' needs to suppress 'cid-codec'
+		if format != "" {
+			if cidCodec != "" && cidCodec != "raw" {
+				return fmt.Errorf("unable to use %q (deprecated) and a custom %q at the same time", blockFormatOptionName, blockCidCodecOptionName)
 			}
+			cidCodec = "" // makes it no-op
 		}
 
 		pin, _ := req.Options[pinOptionName].(bool)
 
-		p, err := api.Block().Put(req.Context, file,
-			options.Block.Hash(mhtval, mhlen),
-			options.Block.Format(format),
-			options.Block.Pin(pin))
-		if err != nil {
-			return err
+		it := req.Files.Entries()
+		for it.Next() {
+			file := files.FileFromEntry(it)
+			if file == nil {
+				return errors.New("expected a file")
+			}
+
+			p, err := api.Block().Put(req.Context, file,
+				options.Block.Hash(mhtval, mhlen),
+				options.Block.CidCodec(cidCodec),
+				options.Block.Format(format),
+				options.Block.Pin(pin))
+			if err != nil {
+				return err
+			}
+
+			if err := cmdutils.CheckBlockSize(req, uint64(p.Size())); err != nil {
+				return err
+			}
+
+			err = res.Emit(&BlockStat{
+				Key:  enc.Encode(p.Path().RootCid()),
+				Size: p.Size(),
+			})
+			if err != nil {
+				return err
+			}
 		}
 
-		return cmds.EmitOnce(res, &BlockStat{
-			Key:  p.Path().Cid().String(),
-			Size: p.Size(),
-		})
+		return it.Err()
 	},
 	Encoders: cmds.EncoderMap{
 		cmds.Text: cmds.MakeTypedEncoder(func(req *cmds.Request, w io.Writer, bs *BlockStat) error {
@@ -208,23 +264,33 @@ const (
 	blockQuietOptionName = "quiet"
 )
 
+type removedBlock struct {
+	Hash  string `json:",omitempty"`
+	Error string `json:",omitempty"`
+}
+
 var blockRmCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
-		Tagline: "Remove IPFS block(s).",
+	Helptext: cmds.HelpText{
+		Tagline: "Remove IPFS block(s) from the local datastore.",
 		ShortDescription: `
 'ipfs block rm' is a plumbing command for removing raw ipfs blocks.
-It takes a list of base58 encoded multihashes to remove.
+It takes a list of CIDs to remove from the local datastore..
 `,
 	},
-	Arguments: []cmdkit.Argument{
-		cmdkit.StringArg("hash", true, true, "Bash58 encoded multihash of block(s) to remove."),
+	Arguments: []cmds.Argument{
+		cmds.StringArg("cid", true, true, "CIDs of block(s) to remove."),
 	},
-	Options: []cmdkit.Option{
-		cmdkit.BoolOption(forceOptionName, "f", "Ignore nonexistent blocks."),
-		cmdkit.BoolOption(blockQuietOptionName, "q", "Write minimal output."),
+	Options: []cmds.Option{
+		cmds.BoolOption(forceOptionName, "f", "Ignore nonexistent blocks."),
+		cmds.BoolOption(blockQuietOptionName, "q", "Write minimal output."),
 	},
 	Run: func(req *cmds.Request, res cmds.ResponseEmitter, env cmds.Environment) error {
 		api, err := cmdenv.GetApi(env, req)
+		if err != nil {
+			return err
+		}
+
+		enc, err := cmdenv.GetCidEncoder(req)
 		if err != nil {
 			return err
 		}
@@ -234,20 +300,20 @@ It takes a list of base58 encoded multihashes to remove.
 
 		// TODO: use batching coreapi when done
 		for _, b := range req.Arguments {
-			p, err := coreiface.ParsePath(b)
+			p, err := cmdutils.PathOrCidPath(b)
 			if err != nil {
 				return err
 			}
 
-			rp, err := api.ResolvePath(req.Context, p)
+			rp, _, err := api.ResolvePath(req.Context, p)
 			if err != nil {
 				return err
 			}
 
 			err = api.Block().Rm(req.Context, rp, options.Block.Force(force))
 			if err != nil {
-				if err := res.Emit(&util.RemovedBlock{
-					Hash:  rp.Cid().String(),
+				if err := res.Emit(&removedBlock{
+					Hash:  enc.Encode(rp.RootCid()),
 					Error: err.Error(),
 				}); err != nil {
 					return err
@@ -256,8 +322,8 @@ It takes a list of base58 encoded multihashes to remove.
 			}
 
 			if !quiet {
-				err := res.Emit(&util.RemovedBlock{
-					Hash: rp.Cid().String(),
+				err := res.Emit(&removedBlock{
+					Hash: enc.Encode(rp.RootCid()),
 				})
 				if err != nil {
 					return err
@@ -269,8 +335,29 @@ It takes a list of base58 encoded multihashes to remove.
 	},
 	PostRun: cmds.PostRunMap{
 		cmds.CLI: func(res cmds.Response, re cmds.ResponseEmitter) error {
-			return util.ProcRmOutput(res.Next, os.Stdout, os.Stderr)
+			someFailed := false
+			for {
+				res, err := res.Next()
+				if err == io.EOF {
+					break
+				} else if err != nil {
+					return err
+				}
+				r := res.(*removedBlock)
+				if r.Hash == "" && r.Error != "" {
+					return fmt.Errorf("aborted: %s", r.Error)
+				} else if r.Error != "" {
+					someFailed = true
+					fmt.Fprintf(os.Stderr, "cannot remove %s: %s\n", r.Hash, r.Error)
+				} else {
+					fmt.Fprintf(os.Stdout, "removed %s\n", r.Hash)
+				}
+			}
+			if someFailed {
+				return fmt.Errorf("some blocks not removed")
+			}
+			return nil
 		},
 	},
-	Type: util.RemovedBlock{},
+	Type: removedBlock{},
 }
